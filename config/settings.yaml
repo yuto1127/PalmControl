@@ -1,0 +1,61 @@
+# PalmControl 設定ファイル
+# 研究用途のため、すべてのパラメータはこのYAMLに集約し、コード変更なしで調整できることを最優先とする。
+
+camera:
+  # OpenCVのVideoCaptureデバイスID（一般に内蔵カメラ=0）
+  device_id: 0
+  # 取得解像度（負荷抑制の推奨: 640x480）
+  width: 640
+  height: 480
+  # 要求FPS（実際のFPSはデバイスやOSに依存）
+  fps: 30
+  # 操作有効エリア（ROI）。カメラ画像全域ではなく中心部のみを使うことで少ない手の動きで全画面をカバーする。
+  # 値は 0.0〜1.0 の正規化座標。
+  roi:
+    enabled: true
+    x: 0.15
+    y: 0.10
+    w: 0.70
+    h: 0.80
+
+detection:
+  # MediaPipeの検出/追跡の信頼度（0.0〜1.0）
+  min_detection_confidence: 0.6
+  min_tracking_confidence: 0.6
+  # 負荷抑制のために解析を間引く（0=間引きなし。1=1フレームおき、2=2フレームおき...）
+  frame_skip: 0
+
+control:
+  # カーソル移動の感度（座標マッピング後に掛ける係数）
+  sensitivity: 1.0
+  # EMAスムージング係数（0に近いほど滑らかで遅延増。1に近いほど生値に近い）
+  smoothing_factor_ema: 0.35
+
+  # クリック/ドラッグ判定（親指と人差し指/中指の距離しきい値）
+  # ピクセルではなく、正規化距離や画面比など、後で実装側が一貫した尺度に変換することを想定。
+  click_threshold: 0.035
+
+  # 連続タップ（左/右クリック）判定の最大間隔（ms）
+  tap_interval_ms: 300
+
+  # クリック時の座標固定（カーソルアンカリング）
+  cursor_anchoring:
+    enabled: true
+    # 「タップの予兆」とみなす距離しきい値（click_thresholdより少し大きめが望ましい）
+    pre_contact_threshold: 0.05
+    # 接触中＋直後の固定フレーム数（Nフレーム）。誤移動抑制のために一時停止する。
+    freeze_frames: 3
+    # 固定中にEMAを継続する場合の係数（0に近いほどほぼ固定）
+    override_smoothing_factor_ema: 0.05
+
+logging:
+  # ログ保存先ディレクトリ（.gitignoreで除外）
+  log_dir: "logs"
+  # ログファイル名（JSON Lines形式を想定。最新が先頭に来るように管理する）
+  log_file_name: "events.jsonl"
+  # 10MBを超えたらローテーション（spec 5.3の例に準拠）
+  max_bytes: 10485760
+  # 保持するバックアップ数（超過分は古いものから削除）
+  backup_count: 10
+  # 低頻度イベントでも研究データが欠落しないよう、基本は即時flush（必要なら将来バッファ化）
+  flush: true
