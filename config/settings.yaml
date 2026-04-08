@@ -4,9 +4,9 @@
 camera:
   # OpenCVのVideoCaptureデバイスID（一般に内蔵カメラ=0）
   device_id: 0
-  # 取得解像度（負荷抑制の推奨: 640x480）
-  width: 640
-  height: 480
+  # 取得解像度
+  width: 424
+  height: 240
   # 要求FPS（実際のFPSはデバイスやOSに依存）
   fps: 30
   # 操作有効エリア（ROI）。カメラ画像全域ではなく中心部のみを使うことで少ない手の動きで全画面をカバーする。
@@ -28,8 +28,11 @@ detection:
 control:
   # カーソル移動の感度（座標マッピング後に掛ける係数）
   sensitivity: 1.0
+  # 軸別感度（未指定なら sensitivity を両軸に適用）
+  sensitivity_x: 1.0
+  sensitivity_y: 1.2
   # EMAスムージング係数（0に近いほど滑らかで遅延増。1に近いほど生値に近い）
-  smoothing_factor_ema: 0.35
+  smoothing_factor: 0.35
 
   # クリック/ドラッグ判定（親指と人差し指/中指の距離しきい値）
   # ピクセルではなく、正規化距離や画面比など、後で実装側が一貫した尺度に変換することを想定。
@@ -37,6 +40,10 @@ control:
 
   # 連続タップ（左/右クリック）判定の最大間隔（ms）
   tap_interval_ms: 300
+
+  # Mouseモードを「確定」とみなすまでの連続フレーム数。
+  # 誤検出による意図しない移動を抑えたい場合は増やす（その分、操作開始が少し遅れる）。
+  mouse_mode_stable_frames: 6
 
   # クリック時の座標固定（カーソルアンカリング）
   cursor_anchoring:

@@ -70,9 +70,13 @@ class ControlConfig:
     """OS制御（マウス等）の設定。"""
 
     sensitivity: float
-    smoothing_factor_ema: float
+    sensitivity_x: float
+    sensitivity_y: float
+    # 互換性: 旧キー smoothing_factor_ema から smoothing_factor へ移行
+    smoothing_factor: float
     click_threshold: float
     tap_interval_ms: int
+    mouse_mode_stable_frames: int
     cursor_anchoring: CursorAnchoringConfig
 
 
@@ -243,13 +247,28 @@ def _validate_settings_dict(raw: Dict[str, Any]) -> Settings:
         ),
     )
 
+    # smoothing_factor は新キー。旧キー smoothing_factor_ema も許容する。
+    smoothing_raw = (
+        control.get("smoothing_factor")
+        if "smoothing_factor" in control
+        else control.get("smoothing_factor_ema", 0.35)
+    )
+    smoothing_name = "control.smoothing_factor" if "smoothing_factor" in control else "control.smoothing_factor_ema"
+
     ctl_cfg = ControlConfig(
         sensitivity=_as_float(control.get("sensitivity", 1.0), name="control.sensitivity"),
-        smoothing_factor_ema=_as_float(
-            control.get("smoothing_factor_ema", 0.35), name="control.smoothing_factor_ema"
+        sensitivity_x=_as_float(
+            control.get("sensitivity_x", control.get("sensitivity", 1.0)), name="control.sensitivity_x"
         ),
+        sensitivity_y=_as_float(
+            control.get("sensitivity_y", control.get("sensitivity", 1.0)), name="control.sensitivity_y"
+        ),
+        smoothing_factor=_as_float(smoothing_raw, name=smoothing_name),
         click_threshold=_as_float(control.get("click_threshold", 0.035), name="control.click_threshold"),
         tap_interval_ms=_as_int(control.get("tap_interval_ms", 300), name="control.tap_interval_ms"),
+        mouse_mode_stable_frames=_as_int(
+            control.get("mouse_mode_stable_frames", 6), name="control.mouse_mode_stable_frames"
+        ),
         cursor_anchoring=anchoring_cfg,
     )
 
