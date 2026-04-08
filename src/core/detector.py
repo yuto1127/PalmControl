@@ -34,6 +34,7 @@ class DetectionResult:
     finger_count: int
     pointer_xy: Optional[Tuple[float, float]]  # 正規化座標(0..1)。Mouseモード時にのみ有効
     contact: bool  # 親指と人差し指が接触（しきい値以下）しているか
+    contact_distance: Optional[float]  # 親指-人差し指距離（正規化）。デバッグ用
     handedness: Optional[str]  # "Left" | "Right" | None
     latency_ms: float
     # テスト/可視化用に、MediaPipeのランドマークをそのまま返す（無ければNone）
@@ -71,6 +72,12 @@ class HandDetector:
         self._t0 = time.perf_counter()
         self._landmarker = self._build_landmarker(self._store.get())
 
+        # contact判定を安定させるための状態
+        self._contact_state = False
+        self._contact_dist_ema: Optional[float] = None
+        self._contact_below_count = 0
+        self._contact_above_count = 0
+
         # detection.* は重要変更扱いではないので通知されない可能性がある。
         # そのため、settingsのスナップショットを毎フレーム参照し、必要な値は都度読む。
 
@@ -98,6 +105,7 @@ class HandDetector:
                 finger_count=0,
                 pointer_xy=None,
                 contact=False,
+                contact_distance=None,
                 handedness=None,
                 latency_ms=dt_ms,
                 hand_landmarks=None,
@@ -116,6 +124,7 @@ class HandDetector:
             finger_count=result.finger_count,
             pointer_xy=result.pointer_xy,
             contact=result.contact,
+            contact_distance=result.contact_distance,
             handedness=result.handedness,
             latency_ms=dt_ms,
             hand_landmarks=result.hand_landmarks,
@@ -130,6 +139,7 @@ class HandDetector:
                     "mode": result.mode,
                     "finger_count": result.finger_count,
                     "contact": result.contact,
+                    "contact_distance": result.contact_distance,
                 },
             )
         return result
@@ -167,11 +177,14 @@ class HandDetector:
         """MediaPipeの出力をPalmControlの研究用表現へ落とし込む。"""
 
         if not getattr(mp_result, "hand_landmarks", None):
+            # 手が見えていないときはコンタクト状態をリセットしておく（貼り付き防止）
+            self._reset_contact_state()
             return DetectionResult(
                 mode="None",
                 finger_count=0,
                 pointer_xy=None,
                 contact=False,
+                contact_distance=None,
                 handedness=None,
                 latency_ms=0.0,
                 hand_landmarks=None,
@@ -193,15 +206,47 @@ class HandDetector:
         finger_count = sum(1 for v in finger_states.values() if v)
 
         # 排他的モード判定
-        if finger_count == 5:
+        # Scrollは「パー」相当だが、実運用では親指だけ判定がブレやすい。
+        # 研究用途として操作感を優先し、index〜pinkyの4本が伸展していればScrollとする。
+        if self._is_scroll_mode(finger_states):
             mode = "Scroll"
         elif self._is_mouse_mode(finger_states):
             mode = "Mouse"
         else:
             mode = "None"
 
-        # コン タクト判定（親指 tip=4 と 人差し指 tip=8 の距離）
-        contact = self._is_contact(hand_landmarks, click_threshold=float(settings.control.click_threshold))
+        # contact_distはデバッグ上重要なので、可能な限り常に返す。
+        # 以前はモード外でNoneにしていたが、これだと「なぜ判定されないか」の調整が難しい。
+        raw_contact_dist = self._contact_distance(hand_landmarks)
+
+        # コンタクト判定（つまみ / pinch）
+        #
+        # 仕様書(4.3.2)の基本は「2本指モード維持中」だが、現実のつまみ動作では
+        # - 人差し指が曲がる（伸展判定がFalseになる）
+        # - 中指が不安定
+        # が起きやすい。
+        #
+        # そこで研究用途として、Scroll以外のときに次のいずれかを満たせばcontact判定を有効化する:
+        # - 人差し指が伸展している
+        # - 中指が伸展している
+        # - すでに距離が「予兆しきい値」以下（つまみ姿勢に入っている）
+        index_ext = bool(finger_states.get("index", False))
+        middle_ext = bool(finger_states.get("middle", False))
+        pre_th = float(settings.control.cursor_anchoring.pre_contact_threshold)
+        contact_enabled = (mode != "Scroll") and (index_ext or middle_ext or (raw_contact_dist <= pre_th))
+
+        if contact_enabled:
+            contact, contact_distance = self._stable_contact(
+                hand_landmarks,
+                click_threshold=float(settings.control.click_threshold),
+                release_threshold=pre_th,
+                # contactだけは応答性を優先して確定フレーム数を軽くする
+                confirm_frames=1,
+            )
+        else:
+            self._reset_contact_state()
+            contact = False
+            contact_distance = raw_contact_dist
 
         pointer_xy: Optional[Tuple[float, float]] = None
         if mode == "Mouse":
@@ -212,10 +257,24 @@ class HandDetector:
             finger_count=finger_count,
             pointer_xy=pointer_xy,
             contact=contact,
+            contact_distance=contact_distance,
             handedness=handedness,
             latency_ms=0.0,
             hand_landmarks=hand_landmarks,
         )
+
+    def _reset_contact_state(self) -> None:
+        """contact判定の内部状態をリセットする。
+
+        意図:
+        - contactは「2本指モード中の親指コンタクト」という文脈依存の状態。
+        - モード外に出たとき（Scroll/None/手なし）は状態を捨てた方が誤検出しにくい。
+        """
+
+        self._contact_state = False
+        self._contact_below_count = 0
+        self._contact_above_count = 0
+        self._contact_dist_ema = None
 
     @staticmethod
     def _is_mouse_mode(finger_states: dict) -> bool:
@@ -226,6 +285,21 @@ class HandDetector:
         ring_ext = bool(finger_states.get("ring", False))
         pinky_ext = bool(finger_states.get("pinky", False))
         return index_ext and middle_ext and (not ring_ext) and (not pinky_ext)
+
+    @staticmethod
+    def _is_scroll_mode(finger_states: dict) -> bool:
+        """スクロール（パー）モードの判定。
+
+        仕様書上は「全指伸展」だが、親指は左右判定や姿勢でブレやすい。
+        そのため、スクロールの意図（手を大きく開く）を捉える目的で、
+        index〜pinkyの4本が伸展していればScrollとして扱う。
+        """
+
+        index_ext = bool(finger_states.get("index", False))
+        middle_ext = bool(finger_states.get("middle", False))
+        ring_ext = bool(finger_states.get("ring", False))
+        pinky_ext = bool(finger_states.get("pinky", False))
+        return index_ext and middle_ext and ring_ext and pinky_ext
 
     @staticmethod
     def _get_finger_states(hand_landmarks, handedness: Optional[str]) -> dict:
@@ -259,14 +333,85 @@ class HandDetector:
         }
 
     @staticmethod
-    def _is_contact(hand_landmarks, *, click_threshold: float) -> bool:
-        """親指と人差し指の距離がしきい値以下かを返す。"""
+    def _contact_distance(hand_landmarks) -> float:
+        """親指(4)と「接触候補点」の最小距離（正規化）を返す。
+
+        研究用途メモ:
+        - 「中間も含める」方式は接触を拾いやすいが、カーソル操作中の誤検出が出やすい。
+        - 「先端のみ」方式は誤検出が減りやすい一方で、閾値（click_threshold）が小さいと
+          なかなかONにならないことがある（指先同士でしっかり“つまむ”必要がある）。
+
+        ここでは要求に合わせて、以下の先端(TIP)のみを候補とする:
+        - 人差し指TIP(8)
+        - 中指TIP(12)
+        """
 
         lm = hand_landmarks
-        dx = lm[4].x - lm[8].x
-        dy = lm[4].y - lm[8].y
-        dist = math.sqrt(dx * dx + dy * dy)
-        return dist <= float(click_threshold)
+        thumb = lm[4]
+        candidates = (8, 12)
+        best = float("inf")
+        for idx in candidates:
+            dx = thumb.x - lm[idx].x
+            dy = thumb.y - lm[idx].y
+            d = math.sqrt(dx * dx + dy * dy)
+            if d < best:
+                best = d
+        return float(best)
+
+    def _stable_contact(
+        self,
+        hand_landmarks,
+        *,
+        click_threshold: float,
+        release_threshold: float,
+        confirm_frames: int,
+    ) -> Tuple[bool, float]:
+        """コンタクト判定を安定化して返す。
+
+        不安定になる原因:
+        - ランドマークはフレームごとに微小に揺れる
+        - 距離が閾値付近だとON/OFFが頻繁に反転してしまう
+
+        対策:
+        - 距離をEMAで軽く平滑化
+        - ヒステリシス: ONはclick_threshold、OFFはrelease_threshold（通常は少し大きい）
+        - confirm_frames: 連続フレームで条件を満たしたときだけ状態遷移する
+        """
+
+        dist = self._contact_distance(hand_landmarks)
+
+        # EMA（軽量・低遅延）。係数は固定で小さくし、手ブレだけ抑える。
+        alpha = 0.4
+        if self._contact_dist_ema is None:
+            self._contact_dist_ema = dist
+        else:
+            self._contact_dist_ema = (alpha * dist) + ((1.0 - alpha) * self._contact_dist_ema)
+
+        d = float(self._contact_dist_ema)
+        on_th = float(click_threshold)
+        off_th = float(max(release_threshold, on_th))
+        need = max(1, int(confirm_frames))
+
+        if not self._contact_state:
+            # OFF→ON: しきい値以下が連続したらON
+            if d <= on_th:
+                self._contact_below_count += 1
+            else:
+                self._contact_below_count = 0
+            if self._contact_below_count >= need:
+                self._contact_state = True
+                self._contact_above_count = 0
+        else:
+            # ON→OFF: release_threshold以上が連続したらOFF
+            if d >= off_th:
+                self._contact_above_count += 1
+            else:
+                self._contact_above_count = 0
+            if self._contact_above_count >= need:
+                self._contact_state = False
+                self._contact_below_count = 0
+
+        return self._contact_state, d
 
     def _compute_pointer_xy(self, hand_landmarks, settings: Settings) -> Tuple[float, float]:
         """Mouseモード用のポインタ座標（正規化0..1）を返す。

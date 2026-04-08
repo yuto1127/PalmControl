@@ -158,6 +158,7 @@ def main() -> int:
             f"mode={res.mode}",
             f"fingers={res.finger_count}",
             f"contact={res.contact}",
+            f"contact_dist={res.contact_distance:.4f}" if res.contact_distance is not None else "contact_dist=None",
             f"latency_ms={res.latency_ms:.1f}",
             f"fps={fps:.1f}",
         ]
