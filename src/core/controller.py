@@ -58,16 +58,22 @@ class MouseController:
 
         self._scroll_prev_center_y: Optional[float] = None
 
-        # 相対操作（モード開始時点を基準にΔで動かす）
+        # 相対操作（空中トラックパッド方式）:
+        # - pointer_xyの「絶対値」を目標座標にせず、フレーム間Δのみを積分してカーソルを動かす。
+        # - モード切替時の座標ジャンプがあっても「開始直後の吸い付き」が起きにくい。
         self._prev_mode: str = "None"
-        self._mouse_origin_hand_xy: Optional[Tuple[float, float]] = None
-        self._mouse_origin_cursor_xy: Optional[Tuple[float, float]] = None
-        self._scroll_origin_center_y: Optional[float] = None
-        self._mouse_settle_frames: int = 0
+        self._mouse_prev_hand_xy: Optional[Tuple[float, float]] = None
+        self._scroll_prev_center_y: Optional[float] = None
         self._mouse_mode_streak: int = 0
-        self._mouse_settle_sum_x: float = 0.0
-        self._mouse_settle_sum_y: float = 0.0
-        self._mouse_settle_count: int = 0
+
+        # アンカー状態（pre_contact/contact で座標固定）
+        self._anchored: bool = False
+        self._anchored_cursor_xy: Optional[Tuple[float, float]] = None
+
+        # クリック姿勢（中指を曲げる）をラッチする。
+        # middle伸展判定はフレームごとに揺れることがあるため、
+        # 「一瞬だけ伸びた」でクリックが無効化されるのを防ぐ。
+        self._click_pose_active: bool = False
 
     def reset(self) -> None:
         """内部状態を全リセット（安全停止/再開時用）。"""
@@ -79,14 +85,11 @@ class MouseController:
         self._tap_times_ms.clear()
         self._scroll_prev_center_y = None
         self._prev_mode = "None"
-        self._mouse_origin_hand_xy = None
-        self._mouse_origin_cursor_xy = None
-        self._scroll_origin_center_y = None
-        self._mouse_settle_frames = 0
+        self._mouse_prev_hand_xy = None
         self._mouse_mode_streak = 0
-        self._mouse_settle_sum_x = 0.0
-        self._mouse_settle_sum_y = 0.0
-        self._mouse_settle_count = 0
+        self._anchored = False
+        self._anchored_cursor_xy = None
+        self._click_pose_active = False
 
         # 押しっぱなしを残さない（安全側）
         try:
@@ -101,6 +104,11 @@ class MouseController:
         now_ms = int(time.time() * 1000)
 
         moved = scrolled = left_clicked = right_clicked = drag_down = drag_up = anchored = False
+
+        # Mouseモード以外では、相対移動の状態（前フレーム座標/EMA）を残さない。
+        if det.mode != "Mouse":
+            self._mouse_prev_hand_xy = None
+            self._ema.reset()
 
         # Mouseモードは誤判定/揺れがあり得るため、連続フレームで安定してから操作を開始する。
         # 「指を立てていないのに座標が反映される」問題の多くは、ここで弾ける。
@@ -130,8 +138,9 @@ class MouseController:
                 anchored=False,
             )
 
-        # Mouse/None：スクロール状態はリセット
-        self._scroll_origin_center_y = None
+        # Mouse/None：スクロール基準はリセット
+        if det.mode != "Scroll":
+            self._scroll_prev_center_y = None
 
         # --- Cursor Anchoring（接触中 or 予兆） ---
         anch_cfg = settings.control.cursor_anchoring
@@ -140,8 +149,37 @@ class MouseController:
             and (det.contact_distance is not None)
             and (float(det.contact_distance) <= float(anch_cfg.pre_contact_threshold))
         )
-        anchoring_active = bool(anch_cfg.enabled) and (bool(det.contact) or pre_contact)
+        middle_bent = not bool(det.middle_extended)
+
+        # クリック姿勢ラッチ（middleが曲がったら有効化、明確に解除条件が来るまで保持）
+        if middle_bent:
+            self._click_pose_active = True
+        # contact/pre_contact中は「クリックするつもり」の可能性が高いので、解除しない
+        if (not middle_bent) and (not bool(det.contact)) and (not pre_contact):
+            self._click_pose_active = False
+
+        suppress_move_middle = bool(settings.control.move_suppress_on_middle_bent) and self._click_pose_active
+
+        anchoring_active = bool(anch_cfg.enabled) and (bool(det.contact) or pre_contact or suppress_move_middle)
         anchored = anchoring_active
+
+        # 合意仕様: 予兆(pre_contact)に入った瞬間からカーソルを固定する（精度最優先）。
+        # ここで「固定開始/解除」の遷移を明確にし、解除後のジャンプ（Δの積分）を防ぐ。
+        if anchoring_active and not self._anchored:
+            cur = pyautogui.position()
+            self._anchored_cursor_xy = (float(cur.x), float(cur.y))
+            self._anchored = True
+            # 固定開始時点での手位置をprevとして採用し、固定中にΔが溜まらないようにする
+            if det.pointer_xy is not None:
+                self._mouse_prev_hand_xy = det.pointer_xy
+            self._ema.reset()
+        elif (not anchoring_active) and self._anchored:
+            # 固定解除：解除直後の1フレームでΔが大きくならないようprevを更新
+            self._anchored = False
+            self._anchored_cursor_xy = None
+            if det.pointer_xy is not None:
+                self._mouse_prev_hand_xy = det.pointer_xy
+            self._ema.reset()
 
         # --- マウス移動 ---
         stable_frames = max(1, int(settings.control.mouse_mode_stable_frames))
@@ -149,7 +187,13 @@ class MouseController:
             moved = self._handle_move(det.pointer_xy, settings, anchoring_active)
 
         # --- Action Queueing（タップ/ドラッグ） ---
-        lc, rc, dd, du = self._handle_contact_actions(det, settings, now_ms)
+        # クリック系は「中指が曲がっている」ことを必須条件にする（誤操作防止）
+        if bool(settings.control.click_requires_middle_bent) and (not self._click_pose_active):
+            lc = rc = dd = du = False
+            # 状態が残って誤発火しないようリセット
+            self._reset_contact_queue_state()
+        else:
+            lc, rc, dd, du = self._handle_contact_actions(det, settings, now_ms)
         left_clicked |= lc
         right_clicked |= rc
         drag_down |= dd
@@ -173,67 +217,74 @@ class MouseController:
         sens_x = float(settings.control.sensitivity_x)
         sens_y = float(settings.control.sensitivity_y)
 
-        # 相対操作: モード開始時の手位置を原点としてΔで動かす
-        if self._mouse_origin_hand_xy is None or self._mouse_origin_cursor_xy is None:
-            # 保険：原点が無ければ現時点を原点として設定する
-            self._mouse_origin_hand_xy = pointer_xy
-            cur = pyautogui.position()
-            self._mouse_origin_cursor_xy = (float(cur.x), float(cur.y))
-            self._ema.reset()
-
-        # モード突入直後は座標が跳ぶ/揺れることがあるため、数フレームは移動しない。
-        # この期間のpointerを平均して「開始手位置」を確定することで、
-        # None中の手の移動がMouse開始直後のΔとして乗ってしまう問題を抑える。
-        if self._mouse_settle_frames > 0:
-            self._mouse_settle_frames -= 1
-            self._mouse_settle_sum_x += float(pointer_xy[0])
-            self._mouse_settle_sum_y += float(pointer_xy[1])
-            self._mouse_settle_count += 1
-
-            if self._mouse_settle_frames == 0 and self._mouse_settle_count > 0:
-                avg_x = self._mouse_settle_sum_x / float(self._mouse_settle_count)
-                avg_y = self._mouse_settle_sum_y / float(self._mouse_settle_count)
-                self._mouse_origin_hand_xy = (avg_x, avg_y)
-                # カーソル原点は「Mouseに入った瞬間の位置」を維持する（ここでは更新しない）
-            self._ema.reset()
-            return False
-
-        ox, oy = self._mouse_origin_hand_xy
-        cx0, cy0 = self._mouse_origin_cursor_xy
-        dx_norm = float(pointer_xy[0]) - float(ox)
-        dy_norm = float(pointer_xy[1]) - float(oy)
-
-        # デッドゾーン:
-        # 手を「動かしていないつもり」でも、検出座標はフレームごとに微小に揺れる。
-        # 相対操作ではこの揺れがそのままカーソルのドリフトとして現れるため、
-        # 一定以下のΔは「静止」とみなして無視する。
-        #
-        # さらに、静止中は原点を現在値へ追従させる（re-center）ことで、
-        # 長時間の微小揺れでも原点がズレ続けないようにする。
-        deadzone = 0.006  # 正規化座標での許容揺れ（経験則。必要なら将来設定化）
-        if (abs(dx_norm) < deadzone) and (abs(dy_norm) < deadzone):
-            self._mouse_origin_hand_xy = pointer_xy
-            return False
-
-        # 正規化Δを画面Δへ
-        target_x = cx0 + (dx_norm * float(screen_w) * sens_x)
-        target_y = cy0 + (dy_norm * float(screen_h) * sens_y)
-
-        # アンカー中はEMAを極端に重くして“固定感”を出す
+        # クリック/タップ直前〜接触中は「座標固定」を最優先する。
+        # 相対移動方式では、接触動作中の微小な手ブレがΔとして積分されやすく、
+        # 「クリック時にカーソルが逃げる」原因になりがち。
         if anchoring_active:
-            alpha = float(settings.control.cursor_anchoring.override_smoothing_factor_ema)
-            tmp = EMAFilter(alpha=max(min(alpha, 1.0), 1e-6))
-            # 現在のEMA状態を引き継いでから更新（急なジャンプを避ける）
-            tmp._x = self._ema._x
-            tmp._y = self._ema._y
-            x_s, y_s = tmp.update(target_x, target_y)
-            self._ema._x, self._ema._y = tmp._x, tmp._y
-        else:
-            self._ema.alpha = float(settings.control.smoothing_factor)
-            x_s, y_s = self._ema.update(target_x, target_y)
+            # 次のフレームでΔが大きくならないよう、前回手座標だけ更新して移動しない。
+            self._mouse_prev_hand_xy = pointer_xy
+            # EMAもリセットして、解除直後の追従で余計な残りが出ないようにする。
+            self._ema.reset()
+            # 念のため「固定開始時点のカーソル位置」に戻す（ごく稀なズレ/競合対策）
+            if self._anchored_cursor_xy is not None:
+                ax, ay = self._anchored_cursor_xy
+                try:
+                    pyautogui.moveTo(int(ax), int(ay))
+                except Exception:
+                    pass
+            return False
+
+        # 前フレームとの差分Δで動かす
+        if self._mouse_prev_hand_xy is None:
+            self._mouse_prev_hand_xy = pointer_xy
+            self._ema.reset()
+            return False
+
+        prev_x, prev_y = self._mouse_prev_hand_xy
+        dx_norm = float(pointer_xy[0]) - float(prev_x)
+        dy_norm = float(pointer_xy[1]) - float(prev_y)
+        self._mouse_prev_hand_xy = pointer_xy
+
+        # ノイズ抑制（デッドゾーン）＋急ジャンプ抑制（クランプ）
+        deadzone = float(settings.control.relative_move_deadzone)
+        if abs(dx_norm) < deadzone:
+            dx_norm = 0.0
+        if abs(dy_norm) < deadzone:
+            dy_norm = 0.0
+        if dx_norm == 0.0 and dy_norm == 0.0:
+            return False
+
+        clamp_th = float(settings.control.relative_move_clamp_th)
+        if dx_norm > clamp_th:
+            dx_norm = clamp_th
+        elif dx_norm < -clamp_th:
+            dx_norm = -clamp_th
+        if dy_norm > clamp_th:
+            dy_norm = clamp_th
+        elif dy_norm < -clamp_th:
+            dy_norm = -clamp_th
+
+        cur = pyautogui.position()
+        target_x = float(cur.x) + (dx_norm * float(screen_w) * sens_x)
+        target_y = float(cur.y) + (dy_norm * float(screen_h) * sens_y)
+
+        self._ema.alpha = float(settings.control.smoothing_factor)
+        x_s, y_s = self._ema.update(target_x, target_y)
 
         pyautogui.moveTo(int(x_s), int(y_s))
         return True
+
+    def get_debug_state(self) -> dict:
+        """動作確認用に内部状態を返す（testsで表示に使用）。"""
+
+        return {
+            "prev_mode": self._prev_mode,
+            "mouse_mode_streak": self._mouse_mode_streak,
+            "prev_hand_xy": self._mouse_prev_hand_xy,
+            "anchored": self._anchored,
+            "anchored_cursor_xy": self._anchored_cursor_xy,
+            "click_pose_active": self._click_pose_active,
+        }
 
     def _handle_contact_actions(
         self, det: DetectionResult, settings: Settings, now_ms: int
@@ -325,11 +376,10 @@ class MouseController:
 
         dy = float(center_y) - float(self._scroll_origin_center_y)
         # 微小な揺れで勝手にスクロールしないようデッドゾーンを設ける
-        if abs(dy) < 0.003:
+        if abs(dy) < float(settings.control.scroll_deadzone):
             return False
         # 画面上方向（yが小さくなる）が「上スクロール」になるよう符号を調整する
-        # scrollの感度は将来的に設定化できるが、初期は固定係数とする。
-        scroll_amount = int(-dy * 1200)
+        scroll_amount = int(-dy * int(settings.control.scroll_sensitivity))
         if scroll_amount != 0:
             try:
                 pyautogui.scroll(scroll_amount)
@@ -342,24 +392,13 @@ class MouseController:
         """モード遷移時に相対操作の原点を設定する。"""
 
         if det.mode == "Mouse" and det.pointer_xy is not None:
-            # いったん現時点を原点候補にし、数フレーム平均で確定する（ドリフト/跳び対策）
-            self._mouse_origin_hand_xy = det.pointer_xy
-            cur = pyautogui.position()
-            self._mouse_origin_cursor_xy = (float(cur.x), float(cur.y))
-            # 原点が変わるのでEMAもリセットしてジャンプ/追従遅れを減らす
-            self._ema.reset()
-            self._mouse_settle_frames = 5
-            self._mouse_settle_sum_x = 0.0
-            self._mouse_settle_sum_y = 0.0
-            self._mouse_settle_count = 0
+            # Mouseに入った瞬間はキャリブレーション（原点設定）のみ行い、移動は開始しない。
+            self._mouse_calibrating = True
         else:
             self._mouse_origin_hand_xy = None
             self._mouse_origin_cursor_xy = None
             self._ema.reset()
-            self._mouse_settle_frames = 0
-            self._mouse_settle_sum_x = 0.0
-            self._mouse_settle_sum_y = 0.0
-            self._mouse_settle_count = 0
+            self._mouse_calibrating = False
 
         if det.mode == "Scroll":
             self._scroll_origin_center_y = self._compute_palm_center_y(det)

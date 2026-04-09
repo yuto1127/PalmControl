@@ -77,6 +77,12 @@ class ControlConfig:
     click_threshold: float
     tap_interval_ms: int
     mouse_mode_stable_frames: int
+    relative_move_deadzone: float
+    relative_move_clamp_th: float
+    click_requires_middle_bent: bool
+    move_suppress_on_middle_bent: bool
+    scroll_sensitivity: int
+    scroll_deadzone: float
     cursor_anchoring: CursorAnchoringConfig
 
 
@@ -269,6 +275,20 @@ def _validate_settings_dict(raw: Dict[str, Any]) -> Settings:
         mouse_mode_stable_frames=_as_int(
             control.get("mouse_mode_stable_frames", 6), name="control.mouse_mode_stable_frames"
         ),
+        relative_move_deadzone=_as_float(
+            control.get("relative_move_deadzone", 0.004), name="control.relative_move_deadzone"
+        ),
+        relative_move_clamp_th=_as_float(
+            control.get("relative_move_clamp_th", 0.03), name="control.relative_move_clamp_th"
+        ),
+        click_requires_middle_bent=_as_bool(
+            control.get("click_requires_middle_bent", True), name="control.click_requires_middle_bent"
+        ),
+        move_suppress_on_middle_bent=_as_bool(
+            control.get("move_suppress_on_middle_bent", True), name="control.move_suppress_on_middle_bent"
+        ),
+        scroll_sensitivity=_as_int(control.get("scroll_sensitivity", 1200), name="control.scroll_sensitivity"),
+        scroll_deadzone=_as_float(control.get("scroll_deadzone", 0.003), name="control.scroll_deadzone"),
         cursor_anchoring=anchoring_cfg,
     )
 

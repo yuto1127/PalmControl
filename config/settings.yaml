@@ -5,7 +5,7 @@ camera:
   # OpenCVのVideoCaptureデバイスID（一般に内蔵カメラ=0）
   device_id: 0
   # 取得解像度
-  width: 424
+  width: 360
   height: 240
   # 要求FPS（実際のFPSはデバイスやOSに依存）
   fps: 30
@@ -27,23 +27,43 @@ detection:
 
 control:
   # カーソル移動の感度（座標マッピング後に掛ける係数）
-  sensitivity: 1.0
+  sensitivity: 1.5
   # 軸別感度（未指定なら sensitivity を両軸に適用）
-  sensitivity_x: 1.0
-  sensitivity_y: 1.2
+  sensitivity_x: 1.4
+  sensitivity_y: 1.8
   # EMAスムージング係数（0に近いほど滑らかで遅延増。1に近いほど生値に近い）
   smoothing_factor: 0.35
 
   # クリック/ドラッグ判定（親指と人差し指/中指の距離しきい値）
   # ピクセルではなく、正規化距離や画面比など、後で実装側が一貫した尺度に変換することを想定。
-  click_threshold: 0.050
+  click_threshold: 0.060
 
   # 連続タップ（左/右クリック）判定の最大間隔（ms）
-  tap_interval_ms: 300
+  tap_interval_ms: 600
 
   # Mouseモードを「確定」とみなすまでの連続フレーム数。
   # 誤検出による意図しない移動を抑えたい場合は増やす（その分、操作開始が少し遅れる）。
   mouse_mode_stable_frames: 6
+
+  # 相対移動（空中トラックパッド方式）の調整
+  # - deadzone: 微小揺れを無視する閾値（小さくすると敏感、大きくすると安定だが動き出しが重い）
+  # - clamp_th: 1フレームあたりの最大Δ（小さすぎると移動距離が伸びない）
+  relative_move_deadzone: 0.003
+  relative_move_clamp_th: 0.08
+
+  # スクロールの調整
+  # Scrollモード中の「手のひら中心Yの変位」からスクロール量へ変換する係数。
+  # 大きいほど速くスクロールする。
+  scroll_sensitivity: 20
+  # 微小揺れで勝手にスクロールしないためのデッドゾーン（正規化Y）
+  scroll_deadzone: 0.004
+
+  # クリック/ドラッグを発火させる条件（誤操作防止）
+  # 中指を曲げた（middleが伸展していない）状態でのみクリック系を許可する。
+  click_requires_middle_bent: true
+
+  # 中指を曲げ始めたらカーソル移動を抑制（クリック姿勢に入ったら固定寄りにする）
+  move_suppress_on_middle_bent: true
 
   # クリック時の座標固定（カーソルアンカリング）
   cursor_anchoring:

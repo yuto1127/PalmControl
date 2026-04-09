@@ -71,11 +71,9 @@ def main() -> int:
 
         det = detector.process(frame)
 
-        # 安全のため、Noneモードでは操作しない（手が見えてない等）
-        if det.mode != "None":
-            out = controller.update(det)
-        else:
-            out = None
+        # controllerは内部でmodeに応じて「移動/スクロール」を分岐する。
+        # クリック判定（contactキュー）は mode=None でも走らせたいので、常にupdateへ渡す。
+        out = controller.update(det)
 
         # FPS（表示用）
         now = time.perf_counter()
@@ -86,10 +84,21 @@ def main() -> int:
             fps = (fps * 0.9) + (inst * 0.1) if fps > 0 else inst
 
         # 表示（手は描画しない。制御が入っているかの簡易確認に留める）
+        dbg = controller.get_debug_state()
+        dxdy = ""
+        if det.pointer_xy is not None and dbg.get("prev_hand_xy") is not None:
+            px, py = dbg["prev_hand_xy"]
+            dxdy = f"dxdy=({det.pointer_xy[0]-px:+.3f},{det.pointer_xy[1]-py:+.3f})"
+
         lines = [
             f"mode={det.mode}",
+            f"index_ext={getattr(det,'index_extended',None)} middle_ext={getattr(det,'middle_extended',None)}",
             f"contact={det.contact}",
             f"contact_dist={det.contact_distance:.4f}" if det.contact_distance is not None else "contact_dist=None",
+            f"pointer_xy={det.pointer_xy[0]:.3f},{det.pointer_xy[1]:.3f}" if det.pointer_xy is not None else "pointer_xy=None",
+            f"prev_hand={dbg.get('prev_hand_xy')}",
+            dxdy if dxdy else "dxdy=n/a",
+            f"streak={dbg.get('mouse_mode_streak')}/{store.get().control.mouse_mode_stable_frames} click_pose={dbg.get('click_pose_active')}",
             f"latency_ms={det.latency_ms:.1f}",
             f"fps={fps:.1f}",
             "STOP: Esc",

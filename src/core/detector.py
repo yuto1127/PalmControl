@@ -32,6 +32,8 @@ class DetectionResult:
 
     mode: str  # "Mouse" | "Scroll" | "None"
     finger_count: int
+    index_extended: bool
+    middle_extended: bool
     pointer_xy: Optional[Tuple[float, float]]  # 正規化座標(0..1)。Mouseモード時にのみ有効
     contact: bool  # 親指と人差し指が接触（しきい値以下）しているか
     contact_distance: Optional[float]  # 親指-人差し指距離（正規化）。デバッグ用
@@ -103,6 +105,8 @@ class HandDetector:
             return DetectionResult(
                 mode="None",
                 finger_count=0,
+                index_extended=False,
+                middle_extended=False,
                 pointer_xy=None,
                 contact=False,
                 contact_distance=None,
@@ -122,6 +126,8 @@ class HandDetector:
         result = DetectionResult(
             mode=result.mode,
             finger_count=result.finger_count,
+            index_extended=result.index_extended,
+            middle_extended=result.middle_extended,
             pointer_xy=result.pointer_xy,
             contact=result.contact,
             contact_distance=result.contact_distance,
@@ -182,6 +188,8 @@ class HandDetector:
             return DetectionResult(
                 mode="None",
                 finger_count=0,
+                index_extended=False,
+                middle_extended=False,
                 pointer_xy=None,
                 contact=False,
                 contact_distance=None,
@@ -255,6 +263,8 @@ class HandDetector:
         return DetectionResult(
             mode=mode,
             finger_count=finger_count,
+            index_extended=index_ext,
+            middle_extended=middle_ext,
             pointer_xy=pointer_xy,
             contact=contact,
             contact_distance=contact_distance,
@@ -278,13 +288,19 @@ class HandDetector:
 
     @staticmethod
     def _is_mouse_mode(finger_states: dict) -> bool:
-        """2本指（人差し指・中指）だけ伸展している状態かを判定する。"""
+        """Mouseモード（カーソル操作）の判定。
+
+        初期仕様では「人差し指＋中指が伸展、薬指＋小指は屈曲」を厳密に要求していたが、
+        実運用ではリング/ピンキーの伸展判定が揺れやすく、Mouseモードに入りにくい。
+
+        Scrollは別で優先判定されているため、ここでは操作性を優先して
+        - 人差し指＋中指が伸展している
+        をMouse条件とする。
+        """
 
         index_ext = bool(finger_states.get("index", False))
         middle_ext = bool(finger_states.get("middle", False))
-        ring_ext = bool(finger_states.get("ring", False))
-        pinky_ext = bool(finger_states.get("pinky", False))
-        return index_ext and middle_ext and (not ring_ext) and (not pinky_ext)
+        return index_ext and middle_ext
 
     @staticmethod
     def _is_scroll_mode(finger_states: dict) -> bool:
