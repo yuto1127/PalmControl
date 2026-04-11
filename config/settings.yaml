@@ -41,6 +41,17 @@ control:
   # 連続タップ（左/右クリック）判定の最大間隔（ms）
   tap_interval_ms: 600
 
+  # ドラッグ開始（長押し）判定のしきい値（ms）
+  # 接触（pinch）をこの時間以上 유지すると mouseDown を発火し、範囲選択などのドラッグ操作に入る。
+  # 誤操作が多い場合は大きく、ドラッグ開始が遅い場合は小さく調整する。
+  drag_hold_ms: 650
+
+  # ドラッグ中の接触（pinch）が一瞬OFFになっても mouseUp しないための猶予。
+  # - drag_contact_grace_ms: この時間未満のOFFは「維持」とみなす
+  # - drag_contact_release_frames: 連続OFFフレームがこの回数以上で離脱（mouseUp）
+  drag_contact_grace_ms: 300
+  drag_contact_release_frames: 5
+
   # Mouseモードを「確定」とみなすまでの連続フレーム数。
   # 誤検出による意図しない移動を抑えたい場合は増やす（その分、操作開始が少し遅れる）。
   mouse_mode_stable_frames: 6

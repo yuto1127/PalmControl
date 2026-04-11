@@ -76,6 +76,9 @@ class ControlConfig:
     smoothing_factor: float
     click_threshold: float
     tap_interval_ms: int
+    drag_hold_ms: int
+    drag_contact_grace_ms: int
+    drag_contact_release_frames: int
     mouse_mode_stable_frames: int
     relative_move_deadzone: float
     relative_move_clamp_th: float
@@ -272,6 +275,15 @@ def _validate_settings_dict(raw: Dict[str, Any]) -> Settings:
         smoothing_factor=_as_float(smoothing_raw, name=smoothing_name),
         click_threshold=_as_float(control.get("click_threshold", 0.035), name="control.click_threshold"),
         tap_interval_ms=_as_int(control.get("tap_interval_ms", 300), name="control.tap_interval_ms"),
+        # 後方互換: drag_hold_ms 未設定なら tap_interval_ms を流用
+        drag_hold_ms=_as_int(
+            control.get("drag_hold_ms", control.get("tap_interval_ms", 300)),
+            name="control.drag_hold_ms",
+        ),
+        drag_contact_grace_ms=_as_int(control.get("drag_contact_grace_ms", 120), name="control.drag_contact_grace_ms"),
+        drag_contact_release_frames=_as_int(
+            control.get("drag_contact_release_frames", 4), name="control.drag_contact_release_frames"
+        ),
         mouse_mode_stable_frames=_as_int(
             control.get("mouse_mode_stable_frames", 6), name="control.mouse_mode_stable_frames"
         ),

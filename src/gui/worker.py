@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import time
-from dataclasses import asdict
 from typing import Optional, Tuple
 
 import cv2
@@ -163,13 +162,14 @@ class VisionControlWorker(QThread):
 
                 det = self._detector.process(frame) if self._detector is not None else None
 
-                # Controller（OS操作）は明示的にONのときだけ
-                if control_enabled and det is not None:
+                ctrl_out = None
+                # Controllerは常に状態更新（dry-run可）し、GUIのデバッグ表示に使う。
+                # OSへの実操作（pyautogui）は control_enabled=True のときのみ。
+                if det is not None and self._controller is not None:
                     try:
-                        self._controller.update(det)  # type: ignore[union-attr]
+                        ctrl_out = self._controller.update(det, apply_actions=bool(control_enabled))
                     except Exception:
-                        # OS操作の失敗でWorkerを落とさない
-                        pass
+                        ctrl_out = None
 
                 # FPS計測（表示用）
                 now = time.perf_counter()
@@ -180,15 +180,40 @@ class VisionControlWorker(QThread):
                     fps = (fps * 0.9) + (inst * 0.1) if fps > 0 else inst
 
                 if det is not None:
+                    settings = self._store.get()
+                    anch = settings.control.cursor_anchoring
+                    pre_contact = False
+                    if det.contact_distance is not None:
+                        pre_contact = bool(float(det.contact_distance) <= float(anch.pre_contact_threshold))
+
+                    dbg = {}
+                    try:
+                        if self._controller is not None:
+                            dbg = self._controller.get_debug_state()
+                    except Exception:
+                        dbg = {}
+
+                    ctrl = {}
+                    if ctrl_out is not None:
+                        try:
+                            ctrl = ctrl_out.__dict__.copy()
+                        except Exception:
+                            ctrl = {}
+
                     self.statusReady.emit(
                         {
                             "mode": det.mode,
+                            "finger_count": int(det.finger_count),
                             "contact": bool(det.contact),
                             "contact_distance": det.contact_distance,
+                            "pre_contact": bool(pre_contact),
                             "latency_ms": det.latency_ms,
                             "fps": fps,
                             "index_extended": bool(det.index_extended),
                             "middle_extended": bool(det.middle_extended),
+                            "control_enabled": bool(control_enabled),
+                            "control": ctrl,
+                            "controller": dbg,
                         }
                     )
 
@@ -197,16 +222,29 @@ class VisionControlWorker(QThread):
                     view = frame.copy()
                     _draw_landmarks_bgr(view, det.hand_landmarks)
                     # 簡易オーバーレイ
-                    cv2.putText(
-                        view,
-                        f"mode={det.mode}  fps={fps:.1f}  lat={det.latency_ms:.1f}ms",
-                        (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.8,
-                        (0, 255, 0),
-                        2,
-                        cv2.LINE_AA,
+                    settings = self._store.get()
+                    anch = settings.control.cursor_anchoring
+                    pre_contact = False
+                    if det.contact_distance is not None:
+                        pre_contact = bool(float(det.contact_distance) <= float(anch.pre_contact_threshold))
+
+                    dbg = {}
+                    try:
+                        if self._controller is not None:
+                            dbg = self._controller.get_debug_state()
+                    except Exception:
+                        dbg = {}
+
+                    line1 = f"mode={det.mode}  fps={fps:.1f}  lat={det.latency_ms:.1f}ms"
+                    line2 = (
+                        f"c={int(bool(det.contact))} pre={int(bool(pre_contact))} "
+                        f"pose={int(bool(dbg.get('click_pose_active')))} "
+                        f"drag={int(bool(dbg.get('dragging')))} "
+                        f"freeze={int(bool(dbg.get('anchoring_freeze')))} "
+                        f"os={int(bool(control_enabled))}"
                     )
+                    cv2.putText(view, line1, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2, cv2.LINE_AA)
+                    cv2.putText(view, line2, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2, cv2.LINE_AA)
                     self.frameReady.emit(_to_qimage(view))
                 else:
                     # プレビューOFF時はQImage生成しない（CPU節約）

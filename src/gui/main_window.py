@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtGui import QImage, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox,
     QDoubleSpinBox,
@@ -14,8 +14,11 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTabWidget,
+    QTextBrowser,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -24,6 +27,41 @@ from PyQt6.QtWidgets import (
 
 from src.gui.worker import VisionControlWorker
 from src.utils.config_loader import ConfigStore
+
+
+class _AspectFitPixmapLabel(QWidget):
+    """カメラプレビュー用: QLabelのPixmapスケーリングだと余白/クリップが分かりにくいので自前で中央フィット描画する。"""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._src: Optional[QPixmap] = None
+        self._scaled: Optional[QPixmap] = None
+
+    def set_source_pixmap(self, pix: Optional[QPixmap]) -> None:
+        self._src = pix
+        self._scaled = None
+        self.update()
+
+    def set_scaled_pixmap(self, pix: Optional[QPixmap]) -> None:
+        """外部（ScrollArea幅基準）でスケール済みPixmapを渡して描画する。"""
+        self._scaled = pix
+        self.update()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), self.palette().window())
+
+        pix = self._scaled if self._scaled is not None else self._src
+        if pix is None or pix.isNull():
+            return
+
+        target = self.rect()
+        if target.width() <= 1 or target.height() <= 1:
+            return
+
+        x = (target.width() - pix.width()) // 2
+        y = (target.height() - pix.height()) // 2
+        painter.drawPixmap(x, y, pix)
 
 
 class MainWindow(QMainWindow):
@@ -38,6 +76,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._store = store
         self._worker = worker
+        self._motion_last_qimage: Optional[QImage] = None
 
         self.setWindowTitle("PalmControl")
         self.resize(980, 720)
@@ -75,6 +114,7 @@ class MainWindow(QMainWindow):
     def _build_settings_tab(self) -> QWidget:
         w = QWidget()
         root = QVBoxLayout(w)
+        root.setContentsMargins(0, 0, 0, 0)
 
         btn_row = QHBoxLayout()
         reload_btn = QPushButton("YAML再読込")
@@ -95,6 +135,7 @@ class MainWindow(QMainWindow):
 
         form_container = QWidget()
         form = QVBoxLayout(form_container)
+        form.setContentsMargins(0, 0, 0, 0)
 
         form.addWidget(self._group_camera())
         form.addWidget(self._group_roi())
@@ -105,7 +146,14 @@ class MainWindow(QMainWindow):
         form.addWidget(self._group_logging())
         form.addStretch(1)
 
-        root.addWidget(form_container)
+        # 設定項目が多いので、フォーム領域だけ縦スクロール可能にする（上部ボタンは固定）
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setWidget(form_container)
+        root.addWidget(scroll, 1)
         return w
 
     def _reload_yaml(self) -> None:
@@ -289,6 +337,36 @@ class MainWindow(QMainWindow):
         ti.valueChanged.connect(lambda v: self._set_value("control.tap_interval_ms", int(v)))
         layout.addRow("タップ間隔（ms）", ti)
 
+        dh = QSpinBox()
+        dh.setRange(50, 3000)
+        dh.setValue(int(getattr(s.control, "drag_hold_ms", s.control.tap_interval_ms)))
+        dh.setToolTip(
+            "接触（pinch）をこの時間以上 유지するとドラッグ開始（mouseDown）になります。"
+            "確定後はドラッグ中のカーソル移動が有効になり、範囲選択ができます。"
+        )
+        dh.valueChanged.connect(lambda v: self._set_value("control.drag_hold_ms", int(v)))
+        layout.addRow("ドラッグ開始（長押しms）", dh)
+
+        dg = QSpinBox()
+        dg.setRange(0, 2000)
+        dg.setValue(int(getattr(s.control, "drag_contact_grace_ms", 120)))
+        dg.setToolTip(
+            "ドラッグ中に接触判定が一瞬OFFになっても、この時間未満なら押下を維持します。"
+            "範囲選択中のmouseUp誤発火を減らします。"
+        )
+        dg.valueChanged.connect(lambda v: self._set_value("control.drag_contact_grace_ms", int(v)))
+        layout.addRow("ドラッグ中:接触OFF猶予（ms）", dg)
+
+        df = QSpinBox()
+        df.setRange(1, 30)
+        df.setValue(int(getattr(s.control, "drag_contact_release_frames", 4)))
+        df.setToolTip(
+            "ドラッグ中に接触OFFがこのフレーム数連続したら離脱（mouseUp）します。"
+            "猶予よりも「本当に離した」判定を優先したい場合に増やします。"
+        )
+        df.valueChanged.connect(lambda v: self._set_value("control.drag_contact_release_frames", int(v)))
+        layout.addRow("ドラッグ中:離脱確定フレーム", df)
+
         mf = QSpinBox()
         mf.setRange(1, 30)
         mf.setValue(int(s.control.mouse_mode_stable_frames))
@@ -438,6 +516,8 @@ class MainWindow(QMainWindow):
     def _build_motion_tab(self) -> QWidget:
         w = QWidget()
         root = QVBoxLayout(w)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(6)
 
         ctl_row = QHBoxLayout()
         self._preview_cb = QCheckBox("プレビュー表示（重い）")
@@ -455,10 +535,20 @@ class MainWindow(QMainWindow):
         self._status_label = QLabel("status: -")
         root.addWidget(self._status_label)
 
-        self._frame_label = QLabel()
-        self._frame_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._frame_label.setMinimumHeight(480)
-        root.addWidget(self._frame_label, 1)
+        self._frame_label = _AspectFitPixmapLabel()
+        self._frame_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        # 横長映像を縦長プレビュー領域に「全体フィット」すると上下のレターボックスが大きくなりやすい。
+        # まずは横幅基準でスケールし、縦が溢れる場合はスクロールで確認できるようにする。
+        self._motion_scroll = QScrollArea()
+        # False: 子ウィジェットの高さをコンテンツに合わせ、縦スクロールを成立させる
+        self._motion_scroll.setWidgetResizable(False)
+        self._motion_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._motion_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._motion_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._motion_scroll.setWidget(self._frame_label)
+        self._motion_scroll.setMinimumHeight(240)
+        root.addWidget(self._motion_scroll, 1)
 
         return w
 
@@ -487,15 +577,49 @@ class MainWindow(QMainWindow):
         self.set_control_enabled(enabled, emit=True)
 
     def _on_frame_ready(self, qimg: QImage) -> None:
-        pix = QPixmap.fromImage(qimg)
-        self._frame_label.setPixmap(pix.scaled(self._frame_label.size(), Qt.AspectRatioMode.KeepAspectRatio))
+        self._motion_last_qimage = qimg
+        self._layout_motion_preview()
+
+    def _layout_motion_preview(self) -> None:
+        if not hasattr(self, "_motion_scroll"):
+            return
+        if self._motion_last_qimage is None:
+            return
+
+        vp_w = max(1, int(self._motion_scroll.viewport().width()))
+        src = QPixmap.fromImage(self._motion_last_qimage)
+        if src.isNull():
+            return
+
+        scaled = src.scaledToWidth(vp_w, Qt.TransformationMode.SmoothTransformation)
+        self._frame_label.setFixedSize(scaled.size())
+        self._frame_label.set_scaled_pixmap(scaled)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._layout_motion_preview()
 
     def _on_status_ready(self, status: dict) -> None:
         try:
+            dbg = status.get("controller") or {}
+            ctrl = status.get("control") or {}
+            dist = status.get("contact_distance")
+            dist_s = f"{float(dist):.4f}" if isinstance(dist, (int, float)) else str(dist)
+
             self._status_label.setText(
-                f"mode={status.get('mode')} contact={status.get('contact')} "
-                f"dist={status.get('contact_distance')} "
-                f"lat={status.get('latency_ms'):.1f}ms fps={status.get('fps'):.1f}"
+                "vision: "
+                f"mode={status.get('mode')} fc={status.get('finger_count')} "
+                f"idx={int(bool(status.get('index_extended')))} mid={int(bool(status.get('middle_extended')))} "
+                f"c={int(bool(status.get('contact')))} pre={int(bool(status.get('pre_contact')))} dist={dist_s} "
+                f"lat={float(status.get('latency_ms')):.1f}ms fps={float(status.get('fps')):.1f}\n"
+                "control: "
+                f"os={int(bool(status.get('control_enabled')))} apply={int(bool(dbg.get('apply_actions')))} "
+                f"streak={dbg.get('mouse_mode_streak')} "
+                f"pose={int(bool(dbg.get('click_pose_active')))} supMid={int(bool(dbg.get('suppress_move_middle')))} "
+                f"drag={int(bool(dbg.get('dragging')))} hold={dbg.get('contact_hold_ms')} tapq={dbg.get('tap_queue_len')} "
+                f"freeze={int(bool(dbg.get('anchoring_freeze')))} rawA={int(bool(dbg.get('anchoring_active_raw')))} "
+                f"moved={int(bool(ctrl.get('moved')))} L={int(bool(ctrl.get('left_clicked')))} "
+                f"R={int(bool(ctrl.get('right_clicked')))} dD={int(bool(ctrl.get('drag_down')))} dU={int(bool(ctrl.get('drag_up')))}"
             )
         except Exception:
             self._status_label.setText(str(status))
@@ -507,6 +631,9 @@ class MainWindow(QMainWindow):
         # モーションタブが見えている時だけプレビューをONにする
         is_motion = self._tabs.tabText(idx) == "モーションテスト"
         self.previewEnabledChanged.emit(bool(is_motion and self._preview_cb.isChecked()))
+        # マニュアルタブ表示時に docs/ を再読み込み（編集反映・起動中の更新向け）
+        if self._tabs.tabText(idx) == "マニュアル":
+            self._reload_manual()
 
     # -----------------------------
     # Log tab
@@ -553,25 +680,44 @@ class MainWindow(QMainWindow):
     def _build_manual_tab(self) -> QWidget:
         w = QWidget()
         root = QVBoxLayout(w)
-        view = QTextEdit()
-        view.setReadOnly(True)
-        view.setPlainText(self._load_manual_text())
-        root.addWidget(view, 1)
+        btn_row = QHBoxLayout()
+        reload_btn = QPushButton("マニュアル再読込")
+        reload_btn.setToolTip("docs/ 内の Markdown をディスクから読み直して表示を更新します。")
+        reload_btn.clicked.connect(self._reload_manual)
+        btn_row.addWidget(reload_btn)
+        btn_row.addStretch(1)
+        root.addLayout(btn_row)
+
+        self._manual_view = QTextBrowser()
+        self._manual_view.setOpenExternalLinks(True)
+        # Markdown表示（QtのMarkdownサブセット）。分割ドキュメントを連結して表示する。
+        self._manual_view.setMarkdown(self._load_manual_text())
+        root.addWidget(self._manual_view, 1)
         return w
+
+    def _reload_manual(self) -> None:
+        if not hasattr(self, "_manual_view"):
+            return
+        self._manual_view.setMarkdown(self._load_manual_text())
+        self._manual_view.verticalScrollBar().setValue(0)
 
     def _load_manual_text(self) -> str:
         docs_dir = Path("docs")
         if not docs_dir.exists():
             return "docs/ が見つかりません。操作ガイドは docs/ に追加してください。"
-        # 最小: docs/ 内の *.md を連結して表示
+        # docs/ 直下の *.md をファイル名順に連結（分割ドキュメントの読み込み順をファイル名で制御）
         md_files = sorted(docs_dir.glob("*.md"))
         if not md_files:
             return "docs/ にMarkdownがありません。操作ガイドを追加してください。"
         parts = []
         for p in md_files:
             try:
-                parts.append(f"=== {p.name} ===\n{p.read_text(encoding='utf-8')}")
+                body = p.read_text(encoding="utf-8").strip()
+                if not body:
+                    continue
+                # 見出しで区切る（ASCIIの大きな区切り線は使わない）
+                parts.append(f"## {p.name}\n\n{body}")
             except Exception:
                 pass
-        return "\n\n".join(parts) if parts else "マニュアルを読み込めませんでした。"
+        return "\n\n---\n\n".join(parts) if parts else "マニュアルを読み込めませんでした。"
 
