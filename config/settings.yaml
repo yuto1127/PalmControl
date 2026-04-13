@@ -27,10 +27,10 @@ detection:
 
 control:
   # カーソル移動の感度（座標マッピング後に掛ける係数）
-  sensitivity: 1.5
+  sensitivity: 2.4
   # 軸別感度（未指定なら sensitivity を両軸に適用）
-  sensitivity_x: 1.4
-  sensitivity_y: 1.8
+  sensitivity_x: 2.2
+  sensitivity_y: 2.6
   # EMAスムージング係数（0に近いほど滑らかで遅延増。1に近いほど生値に近い）
   smoothing_factor: 0.35
 
@@ -60,7 +60,7 @@ control:
   # - deadzone: 微小揺れを無視する閾値（小さくすると敏感、大きくすると安定だが動き出しが重い）
   # - clamp_th: 1フレームあたりの最大Δ（小さすぎると移動距離が伸びない）
   relative_move_deadzone: 0.003
-  relative_move_clamp_th: 0.08
+  relative_move_clamp_th: 0.12
 
   # スクロールの調整
   # Scrollモード中の「手のひら中心Yの変位」からスクロール量へ変換する係数。
