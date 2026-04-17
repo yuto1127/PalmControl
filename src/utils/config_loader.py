@@ -69,6 +69,7 @@ class CursorAnchoringConfig:
 class ControlConfig:
     """OS制御（マウス等）の設定。"""
 
+    pointer_source: str
     sensitivity: float
     sensitivity_x: float
     sensitivity_y: float
@@ -192,6 +193,16 @@ def _as_bool(v: Any, *, name: str) -> bool:
     raise ValueError(f"{name} はboolに変換できる必要があります: {v!r}")
 
 
+def _as_str(v: Any, *, name: str) -> str:
+    try:
+        s = str(v)
+    except Exception as e:
+        raise ValueError(f"{name} はstrに変換できる必要があります: {v!r}") from e
+    if not s:
+        raise ValueError(f"{name} は空文字列にできません")
+    return s
+
+
 def _validate_roi(roi: Dict[str, Any]) -> CameraROI:
     enabled = _as_bool(roi.get("enabled", True), name="camera.roi.enabled")
     x = _as_float(roi.get("x", 0.0), name="camera.roi.x")
@@ -265,6 +276,7 @@ def _validate_settings_dict(raw: Dict[str, Any]) -> Settings:
     smoothing_name = "control.smoothing_factor" if "smoothing_factor" in control else "control.smoothing_factor_ema"
 
     ctl_cfg = ControlConfig(
+        pointer_source=_as_str(control.get("pointer_source", "index_middle_avg"), name="control.pointer_source"),
         sensitivity=_as_float(control.get("sensitivity", 1.0), name="control.sensitivity"),
         sensitivity_x=_as_float(
             control.get("sensitivity_x", control.get("sensitivity", 1.0)), name="control.sensitivity_x"

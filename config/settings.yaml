@@ -1,99 +1,44 @@
-# PalmControl 設定ファイル
-# 研究用途のため、すべてのパラメータはこのYAMLに集約し、コード変更なしで調整できることを最優先とする。
-
 camera:
-  # OpenCVのVideoCaptureデバイスID（一般に内蔵カメラ=0）
   device_id: 0
-  # 取得解像度
   width: 360
   height: 240
-  # 要求FPS（実際のFPSはデバイスやOSに依存）
   fps: 30
-  # 操作有効エリア（ROI）。カメラ画像全域ではなく中心部のみを使うことで少ない手の動きで全画面をカバーする。
-  # 値は 0.0〜1.0 の正規化座標。
   roi:
     enabled: true
     x: 0.15
-    y: 0.10
-    w: 0.70
-    h: 0.80
-
+    y: 0.1
+    w: 0.7
+    h: 0.8
 detection:
-  # MediaPipeの検出/追跡の信頼度（0.0〜1.0）
   min_detection_confidence: 0.6
   min_tracking_confidence: 0.6
-  # 負荷抑制のために解析を間引く（0=間引きなし。1=1フレームおき、2=2フレームおき...）
   frame_skip: 0
-
 control:
-  # カーソル移動の感度（座標マッピング後に掛ける係数）
+  pointer_source: index_tip
   sensitivity: 2.4
-  # 軸別感度（未指定なら sensitivity を両軸に適用）
-  sensitivity_x: 2.2
-  sensitivity_y: 2.6
-  # EMAスムージング係数（0に近いほど滑らかで遅延増。1に近いほど生値に近い）
+  sensitivity_x: 2.3000000000000003
+  sensitivity_y: 2.7
   smoothing_factor: 0.35
-
-  # クリック/ドラッグ判定（親指と人差し指/中指の距離しきい値）
-  # ピクセルではなく、正規化距離や画面比など、後で実装側が一貫した尺度に変換することを想定。
-  click_threshold: 0.060
-
-  # 連続タップ（左/右クリック）判定の最大間隔（ms）
+  click_threshold: 0.065
   tap_interval_ms: 600
-
-  # ドラッグ開始（長押し）判定のしきい値（ms）
-  # 接触（pinch）をこの時間以上 유지すると mouseDown を発火し、範囲選択などのドラッグ操作に入る。
-  # 誤操作が多い場合は大きく、ドラッグ開始が遅い場合は小さく調整する。
   drag_hold_ms: 650
-
-  # ドラッグ中の接触（pinch）が一瞬OFFになっても mouseUp しないための猶予。
-  # - drag_contact_grace_ms: この時間未満のOFFは「維持」とみなす
-  # - drag_contact_release_frames: 連続OFFフレームがこの回数以上で離脱（mouseUp）
   drag_contact_grace_ms: 300
   drag_contact_release_frames: 5
-
-  # Mouseモードを「確定」とみなすまでの連続フレーム数。
-  # 誤検出による意図しない移動を抑えたい場合は増やす（その分、操作開始が少し遅れる）。
   mouse_mode_stable_frames: 6
-
-  # 相対移動（空中トラックパッド方式）の調整
-  # - deadzone: 微小揺れを無視する閾値（小さくすると敏感、大きくすると安定だが動き出しが重い）
-  # - clamp_th: 1フレームあたりの最大Δ（小さすぎると移動距離が伸びない）
-  relative_move_deadzone: 0.003
+  relative_move_deadzone: 0.0
   relative_move_clamp_th: 0.12
-
-  # スクロールの調整
-  # Scrollモード中の「手のひら中心Yの変位」からスクロール量へ変換する係数。
-  # 大きいほど速くスクロールする。
   scroll_sensitivity: 20
-  # 微小揺れで勝手にスクロールしないためのデッドゾーン（正規化Y）
   scroll_deadzone: 0.004
-
-  # クリック/ドラッグを発火させる条件（誤操作防止）
-  # 中指を曲げた（middleが伸展していない）状態でのみクリック系を許可する。
   click_requires_middle_bent: true
-
-  # 中指を曲げ始めたらカーソル移動を抑制（クリック姿勢に入ったら固定寄りにする）
   move_suppress_on_middle_bent: true
-
-  # クリック時の座標固定（カーソルアンカリング）
   cursor_anchoring:
     enabled: true
-    # 「タップの予兆」とみなす距離しきい値（click_thresholdより少し大きめが望ましい）
-    pre_contact_threshold: 0.05
-    # 接触中＋直後の固定フレーム数（Nフレーム）。誤移動抑制のために一時停止する。
+    pre_contact_threshold: 0.06
     freeze_frames: 3
-    # 固定中にEMAを継続する場合の係数（0に近いほどほぼ固定）
     override_smoothing_factor_ema: 0.05
-
 logging:
-  # ログ保存先ディレクトリ（.gitignoreで除外）
-  log_dir: "logs"
-  # ログファイル名（JSON Lines形式を想定。最新が先頭に来るように管理する）
-  log_file_name: "events.jsonl"
-  # 10MBを超えたらローテーション（spec 5.3の例に準拠）
+  log_dir: logs
+  log_file_name: events.jsonl
   max_bytes: 10485760
-  # 保持するバックアップ数（超過分は古いものから削除）
   backup_count: 10
-  # 低頻度イベントでも研究データが欠落しないよう、基本は即時flush（必要なら将来バッファ化）
   flush: true

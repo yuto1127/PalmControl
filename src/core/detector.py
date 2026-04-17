@@ -433,14 +433,22 @@ class HandDetector:
         """Mouseモード用のポインタ座標（正規化0..1）を返す。
 
         仕様:
-        - 人差し指(8)と中指(12)の先端の中間点を採用
+        - control.pointer_source に応じて算出点を切り替える
+          - index_tip: 人差し指先(8)
+          - index_middle_avg: 人差し指先(8)と中指先(12)の平均
         - ROIが有効ならROI内で正規化し直し、少ない手の動きで全画面操作しやすくする
         - 返り値のXは「ユーザー視点で直感的」になるよう鏡補正（mirror_x=Trueなら反転）
         """
 
         lm = hand_landmarks
-        x = (lm[8].x + lm[12].x) / 2.0
-        y = (lm[8].y + lm[12].y) / 2.0
+        src = str(getattr(settings.control, "pointer_source", "index_middle_avg"))
+        if src == "index_tip":
+            x = float(lm[8].x)
+            y = float(lm[8].y)
+        else:
+            # 互換: 未知値は従来挙動（平均）
+            x = (float(lm[8].x) + float(lm[12].x)) / 2.0
+            y = (float(lm[8].y) + float(lm[12].y)) / 2.0
 
         roi = settings.camera.roi
         if roi.enabled:

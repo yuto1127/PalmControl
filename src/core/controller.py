@@ -361,8 +361,14 @@ class MouseController:
         """Mouseモード用ポインタ座標を、ランドマークから再計算する（ドラッグ中のフォールバック）。"""
         try:
             lm = hand_landmarks
-            x = (lm[8].x + lm[12].x) / 2.0
-            y = (lm[8].y + lm[12].y) / 2.0
+            src = str(getattr(settings.control, "pointer_source", "index_middle_avg"))
+            if src == "index_tip":
+                x = float(lm[8].x)
+                y = float(lm[8].y)
+            else:
+                # 互換: 未知値は従来挙動（平均）
+                x = (float(lm[8].x) + float(lm[12].x)) / 2.0
+                y = (float(lm[8].y) + float(lm[12].y)) / 2.0
 
             roi = settings.camera.roi
             if roi.enabled:

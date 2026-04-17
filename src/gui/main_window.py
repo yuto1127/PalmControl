@@ -8,6 +8,7 @@ from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QImage, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
@@ -280,6 +281,16 @@ class MainWindow(QMainWindow):
         g = QGroupBox("操作（移動/クリック）")
         layout = QFormLayout(g)
         s = self._store.get()
+
+        ps = QComboBox()
+        ps.addItem("人差し指先（ブレ抑制）", "index_tip")
+        ps.addItem("人差し指+中指の平均（従来）", "index_middle_avg")
+        current_ps = getattr(s.control, "pointer_source", "index_middle_avg")
+        idx = ps.findData(str(current_ps))
+        ps.setCurrentIndex(idx if idx >= 0 else 1)
+        ps.setToolTip("カーソル位置の算出元です。クリック姿勢（中指の曲げ伸ばし）でブレる場合は「人差し指先」を推奨します。")
+        ps.currentIndexChanged.connect(lambda _: self._set_value("control.pointer_source", str(ps.currentData())))
+        layout.addRow("カーソル基準点", ps)
 
         # 基本感度（軸別未指定のときの共通値）。軸別を直接いじる運用が多いが、yaml互換のため残す。
         s_all = QDoubleSpinBox()
