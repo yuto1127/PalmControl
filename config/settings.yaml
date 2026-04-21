@@ -19,15 +19,15 @@ control:
   sensitivity: 2.4
   sensitivity_x: 2.3000000000000003
   sensitivity_y: 2.7
-  smoothing_factor: 0.35
+  smoothing_factor: 0.45
   click_threshold: 0.065
   tap_interval_ms: 600
   drag_hold_ms: 650
   drag_contact_grace_ms: 300
   drag_contact_release_frames: 5
-  mouse_mode_stable_frames: 6
+  mouse_mode_stable_frames: 4
   relative_move_deadzone: 0.0
-  relative_move_clamp_th: 0.15000000000000002
+  relative_move_clamp_th: 0.25000000000000002
   scroll_sensitivity: 20
   scroll_deadzone: 0.004
   click_requires_middle_bent: true
@@ -38,6 +38,7 @@ control:
     freeze_frames: 3
     override_smoothing_factor_ema: 0.05
 pie_menu:
+  click_threshold: 0.085
   presets:
     custom_1:
       slots:

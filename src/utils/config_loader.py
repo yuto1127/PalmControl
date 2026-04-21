@@ -126,6 +126,7 @@ class PieMenuPreset:
 class PieMenuConfig:
     """PieMenu設定全体。"""
 
+    click_threshold: float
     custom_1: PieMenuPreset
     custom_3: PieMenuPreset
 
@@ -315,7 +316,10 @@ def _validate_pie_menu(raw: Dict[str, Any]) -> PieMenuConfig:
 
     custom_1 = _validate_pie_menu_preset(presets.get("custom_1", {}), name="pie_menu.presets.custom_1")
     custom_3 = _validate_pie_menu_preset(presets.get("custom_3", {}), name="pie_menu.presets.custom_3")
-    return PieMenuConfig(custom_1=custom_1, custom_3=custom_3)
+    click_th = _as_float(pm.get("click_threshold", 0.085), name="pie_menu.click_threshold")
+    if not (0.0 <= float(click_th) <= 0.2):
+        raise ValueError("pie_menu.click_threshold は 0.0〜0.2 の範囲である必要があります")
+    return PieMenuConfig(click_threshold=float(click_th), custom_1=custom_1, custom_3=custom_3)
 
 
 def _validate_settings_dict(raw: Dict[str, Any]) -> Settings:

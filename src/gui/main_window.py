@@ -540,6 +540,23 @@ class MainWindow(QMainWindow):
         info.setWordWrap(True)
         root.addWidget(info)
 
+        # PieMenuの決定（pinch）しきい値
+        s = self._store.get()
+        th_row = QWidget()
+        th_lay = QHBoxLayout(th_row)
+        th_lay.setContentsMargins(0, 0, 0, 0)
+        th_label = QLabel("決定しきい値（大きいほど判定が通りやすい）")
+        th_lay.addWidget(th_label)
+        th = QDoubleSpinBox()
+        th.setRange(0.02, 0.2)
+        th.setSingleStep(0.005)
+        th.setDecimals(3)
+        th.setValue(float(getattr(s.pie_menu, "click_threshold", 0.085)))
+        th.setToolTip("PieMenu表示中の決定判定に使う距離しきい値です。大きいほど『つまみ』が浅くても決定します。")
+        th.valueChanged.connect(lambda v: self._set_value("pie_menu.click_threshold", float(v)))
+        th_lay.addWidget(th)
+        root.addWidget(th_row)
+
         container = QWidget()
         lay = QVBoxLayout(container)
         lay.setContentsMargins(0, 0, 0, 0)

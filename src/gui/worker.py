@@ -271,12 +271,14 @@ class VisionControlWorker(QThread):
 
                     # PieMenuの確定（クリック）:
                     # クリック系のタップ判定は「操作のための姿勢変化」で取りこぼしやすいので、
-                    # PieMenu表示中は contact（pinch）の立ち上がりを「決定クリック」として扱う。
+                    # PieMenu表示中は contact ではなく「距離(contact_distance)」で確定し、反応を軽くする。
                     pie_click = False
                     if self._pie_active and pointer_det is not None:
-                        cur_contact = bool(getattr(pointer_det, "contact", False))
-                        pie_click = bool(cur_contact and (not self._pie_pointer_contact_prev))
-                        self._pie_pointer_contact_prev = bool(cur_contact)
+                        d = getattr(pointer_det, "contact_distance", None)
+                        th = float(getattr(settings.pie_menu, "click_threshold", 0.085))
+                        cur = bool(d is not None and float(d) <= th)
+                        pie_click = bool(cur and (not self._pie_pointer_contact_prev))
+                        self._pie_pointer_contact_prev = bool(cur)
                     else:
                         self._pie_pointer_contact_prev = False
 
