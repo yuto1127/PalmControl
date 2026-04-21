@@ -10,10 +10,12 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -86,11 +88,13 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self._tabs)
 
         self._settings_tab = self._build_settings_tab()
+        self._pie_menu_tab = self._build_pie_menu_tab()
         self._motion_tab = self._build_motion_tab()
         self._log_tab = self._build_log_tab()
         self._manual_tab = self._build_manual_tab()
 
         self._tabs.addTab(self._settings_tab, "設定")
+        self._tabs.addTab(self._pie_menu_tab, "PieMenu設定")
         self._tabs.addTab(self._motion_tab, "モーションテスト")
         self._tabs.addTab(self._log_tab, "ログ")
         self._tabs.addTab(self._manual_tab, "マニュアル")
@@ -520,6 +524,92 @@ class MainWindow(QMainWindow):
     def _set_and_restart(self, dotted: str, value: Any) -> None:
         self._set_value(dotted, value)
         self.requestRestartCamera.emit()
+
+    # -----------------------------
+    # PieMenu settings tab
+    # -----------------------------
+    def _build_pie_menu_tab(self) -> QWidget:
+        w = QWidget()
+        root = QVBoxLayout(w)
+        root.setContentsMargins(0, 0, 0, 0)
+
+        info = QLabel(
+            "Preset 1 / 3 はユーザー設定です。\n"
+            "Type=Shortcut は PyAutoGUI 形式（例: ctrl+shift+p / cmd+space）を想定します。"
+        )
+        info.setWordWrap(True)
+        root.addWidget(info)
+
+        container = QWidget()
+        lay = QVBoxLayout(container)
+        lay.setContentsMargins(0, 0, 0, 0)
+
+        lay.addWidget(self._group_pie_preset("Preset 1 (Custom)", preset_key="custom_1"))
+        lay.addWidget(self._group_pie_preset("Preset 3 (Custom)", preset_key="custom_3"))
+        lay.addStretch(1)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setWidget(container)
+        root.addWidget(scroll, 1)
+        return w
+
+    def _group_pie_preset(self, title: str, *, preset_key: str) -> QGroupBox:
+        g = QGroupBox(title)
+        form = QFormLayout(g)
+
+        s = self._store.get()
+        preset = s.pie_menu.custom_1 if preset_key == "custom_1" else s.pie_menu.custom_3
+
+        for i in range(1, 9):
+            slot = preset.slots[i - 1]
+
+            row = QWidget()
+            row_lay = QHBoxLayout(row)
+            row_lay.setContentsMargins(0, 0, 0, 0)
+
+            label_edit = QLineEdit(str(slot.label))
+            label_edit.setPlaceholderText("Label")
+            label_path = f"pie_menu.presets.{preset_key}.slots.{i}.label"
+            label_edit.textChanged.connect(lambda v, p=label_path: self._set_value(p, str(v)))
+            row_lay.addWidget(label_edit, 2)
+
+            typ = QComboBox()
+            typ.addItem("Shortcut (Key)", "shortcut")
+            typ.addItem("Application (Path)", "application")
+            cur_idx = typ.findData(str(slot.type))
+            typ.setCurrentIndex(cur_idx if cur_idx >= 0 else 0)
+            type_path = f"pie_menu.presets.{preset_key}.slots.{i}.type"
+            typ.currentIndexChanged.connect(lambda _, cb=typ, p=type_path: self._set_value(p, str(cb.currentData())))
+            row_lay.addWidget(typ, 1)
+
+            value_edit = QLineEdit(str(slot.value))
+            value_edit.setPlaceholderText("Value")
+            value_path = f"pie_menu.presets.{preset_key}.slots.{i}.value"
+            value_edit.textChanged.connect(lambda v, p=value_path: self._set_value(p, str(v)))
+            row_lay.addWidget(value_edit, 3)
+
+            browse = QPushButton("参照…")
+
+            def _browse_into_value(*, ve: QLineEdit, p: str) -> None:
+                try:
+                    path, _ = QFileDialog.getOpenFileName(self, "アプリ/ファイルを選択")
+                    if not path:
+                        return
+                    ve.setText(path)
+                    self._set_value(p, str(path))
+                except Exception:
+                    pass
+
+            browse.clicked.connect(lambda _, ve=value_edit, p=value_path: _browse_into_value(ve=ve, p=p))
+            row_lay.addWidget(browse)
+
+            form.addRow(f"Slot {i}", row)
+
+        return g
 
     # -----------------------------
     # Motion tab

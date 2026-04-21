@@ -32,6 +32,7 @@ class DetectionResult:
 
     mode: str  # "Mouse" | "Scroll" | "None"
     finger_count: int
+    thumb_extended: bool
     index_extended: bool
     middle_extended: bool
     pointer_xy: Optional[Tuple[float, float]]  # 正規化座標(0..1)。Mouseモード時にのみ有効
@@ -41,6 +42,19 @@ class DetectionResult:
     latency_ms: float
     # テスト/可視化用に、MediaPipeのランドマークをそのまま返す（無ければNone）
     hand_landmarks: Any | None
+
+
+@dataclass(frozen=True)
+class DualHandResult:
+    """両手の検出結果。
+
+    目的:
+    - MediaPipeのmulti-hand出力を「Left/Right」で正規化して保持する。
+    - 利き手/非利き手の役割割当（Pointer/Command）を上位層（Worker）で行えるようにする。
+    """
+
+    left: Optional[DetectionResult]
+    right: Optional[DetectionResult]
 
 
 class HandDetector:
@@ -91,8 +105,8 @@ class HandDetector:
         except Exception:
             pass
 
-    def process(self, frame_bgr) -> DetectionResult:
-        """BGRフレームを解析し、ジェスチャー状態を返す。"""
+    def process(self, frame_bgr) -> DualHandResult:
+        """BGRフレームを解析し、左右手の状態を返す。"""
 
         t0 = time.perf_counter()
         settings = self._store.get()
@@ -102,9 +116,10 @@ class HandDetector:
         self._frame_index += 1
         if frame_skip > 0 and (self._frame_index % (frame_skip + 1)) != 1:
             dt_ms = (time.perf_counter() - t0) * 1000.0
-            return DetectionResult(
+            empty = DetectionResult(
                 mode="None",
                 finger_count=0,
+                thumb_extended=False,
                 index_extended=False,
                 middle_extended=False,
                 pointer_xy=None,
@@ -114,6 +129,7 @@ class HandDetector:
                 latency_ms=dt_ms,
                 hand_landmarks=None,
             )
+            return DualHandResult(left=None, right=None)
 
         # MediaPipe Tasksは mp.Image（SRGB）を受け取る
         frame_rgb = frame_bgr[:, :, ::-1]
@@ -121,34 +137,26 @@ class HandDetector:
         timestamp_ms = int((time.perf_counter() - self._t0) * 1000.0)
 
         mp_result = self._landmarker.detect_for_video(mp_image, timestamp_ms)
-        result = self._analyze_mediapipe_result(mp_result, settings)
         dt_ms = (time.perf_counter() - t0) * 1000.0
-        result = DetectionResult(
-            mode=result.mode,
-            finger_count=result.finger_count,
-            index_extended=result.index_extended,
-            middle_extended=result.middle_extended,
-            pointer_xy=result.pointer_xy,
-            contact=result.contact,
-            contact_distance=result.contact_distance,
-            handedness=result.handedness,
-            latency_ms=dt_ms,
-            hand_landmarks=result.hand_landmarks,
-        )
+        dual = self._analyze_mediapipe_result_multi(mp_result, settings, dt_ms=dt_ms)
 
         if self._logger is not None:
-            self._logger.write(
-                "INFO",
-                "vision.detector",
-                {
-                    "latency_ms": result.latency_ms,
-                    "mode": result.mode,
-                    "finger_count": result.finger_count,
-                    "contact": result.contact,
-                    "contact_distance": result.contact_distance,
-                },
-            )
-        return result
+            # 研究ログは「現状の代表値」を残せればよいので、Right優先→Leftの順で1件だけ出す。
+            rep = dual.right or dual.left
+            if rep is not None:
+                self._logger.write(
+                    "INFO",
+                    "vision.detector",
+                    {
+                        "latency_ms": rep.latency_ms,
+                        "mode": rep.mode,
+                        "finger_count": rep.finger_count,
+                        "contact": rep.contact,
+                        "contact_distance": rep.contact_distance,
+                        "handedness": rep.handedness,
+                    },
+                )
+        return dual
 
     def _build_landmarker(self, settings: Settings):
         """HandLandmarker(Task API)を構築する。"""
@@ -179,35 +187,45 @@ class HandDetector:
         )
         return HandLandmarker.create_from_options(options)
 
-    def _analyze_mediapipe_result(self, mp_result, settings: Settings) -> DetectionResult:
-        """MediaPipeの出力をPalmControlの研究用表現へ落とし込む。"""
+    def _analyze_mediapipe_result_multi(self, mp_result, settings: Settings, *, dt_ms: float) -> DualHandResult:
+        """MediaPipeのmulti-hand出力を左右手へ正規化する。"""
 
         if not getattr(mp_result, "hand_landmarks", None):
-            # 手が見えていないときはコンタクト状態をリセットしておく（貼り付き防止）
             self._reset_contact_state()
-            return DetectionResult(
-                mode="None",
-                finger_count=0,
-                index_extended=False,
-                middle_extended=False,
-                pointer_xy=None,
-                contact=False,
-                contact_distance=None,
-                handedness=None,
-                latency_ms=0.0,
-                hand_landmarks=None,
-            )
+            return DualHandResult(left=None, right=None)
 
-        # 初期段階では「一番最初の手」だけを採用する。
-        # 両手が映った場合の優先順位（利き手、画面中央に近い方など）は後で研究しやすいように切り出し可能。
-        hand_landmarks = mp_result.hand_landmarks[0]
+        left: Optional[DetectionResult] = None
+        right: Optional[DetectionResult] = None
 
-        handedness: Optional[str] = None
-        if getattr(mp_result, "handedness", None):
-            try:
-                handedness = mp_result.handedness[0][0].category_name
-            except Exception:
-                handedness = None
+        n = len(mp_result.hand_landmarks)
+        for i in range(n):
+            hand_landmarks = mp_result.hand_landmarks[i]
+            handedness: Optional[str] = None
+            if getattr(mp_result, "handedness", None):
+                try:
+                    handedness = mp_result.handedness[i][0].category_name
+                except Exception:
+                    handedness = None
+
+            # NOTE:
+            # handedness は MediaPipe が推定する「人の左右」であり、表示上の鏡反転(mirror_x)とは独立に扱う。
+            # ここでmirror_xに合わせて左右を反転させると、物理的な右手/左手の役割が入れ替わり誤動作しやすい。
+
+            one = self._analyze_single_hand(hand_landmarks, handedness, settings, dt_ms=dt_ms)
+            if handedness == "Left":
+                left = one
+            elif handedness == "Right":
+                right = one
+            else:
+                # handednessが確定しない手は左右に割り当てない（役割混線防止）
+                pass
+
+        return DualHandResult(left=left, right=right)
+
+    def _analyze_single_hand(
+        self, hand_landmarks, handedness: Optional[str], settings: Settings, *, dt_ms: float
+    ) -> DetectionResult:
+        """単一手のランドマークをPalmControlの研究用表現へ落とし込む。"""
 
         # 指の伸展・屈曲状態（Finger Count Priority）
         finger_states = self._get_finger_states(hand_landmarks, handedness)
@@ -240,6 +258,7 @@ class HandDetector:
         # - すでに距離が「予兆しきい値」以下（つまみ姿勢に入っている）
         index_ext = bool(finger_states.get("index", False))
         middle_ext = bool(finger_states.get("middle", False))
+        thumb_ext = bool(finger_states.get("thumb", False))
         pre_th = float(settings.control.cursor_anchoring.pre_contact_threshold)
         contact_enabled = (mode != "Scroll") and (index_ext or middle_ext or (raw_contact_dist <= pre_th))
 
@@ -263,13 +282,14 @@ class HandDetector:
         return DetectionResult(
             mode=mode,
             finger_count=finger_count,
+            thumb_extended=thumb_ext,
             index_extended=index_ext,
             middle_extended=middle_ext,
             pointer_xy=pointer_xy,
             contact=contact,
             contact_distance=contact_distance,
             handedness=handedness,
-            latency_ms=0.0,
+            latency_ms=float(dt_ms),
             hand_landmarks=hand_landmarks,
         )
 

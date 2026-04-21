@@ -9,7 +9,7 @@ from PyQt6.QtCore import QMutex, QObject, QThread, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QImage
 
 from src.core.controller import MouseController
-from src.core.detector import HandDetector
+from src.core.detector import DualHandResult, HandDetector
 from src.utils.config_loader import ConfigStore, Settings
 from src.utils.logger import LoggingManager
 
@@ -89,6 +89,7 @@ class VisionControlWorker(QThread):
 
     frameReady = pyqtSignal(QImage)
     statusReady = pyqtSignal(dict)
+    pieMenuStateReady = pyqtSignal(dict)
     error = pyqtSignal(str)
 
     def __init__(self, store: ConfigStore, parent: Optional[QObject] = None) -> None:
@@ -108,6 +109,14 @@ class VisionControlWorker(QThread):
         self._detector: Optional[HandDetector] = None
         self._controller: Optional[MouseController] = None
         self._cap: Optional[cv2.VideoCapture] = None
+
+        # PieMenu連携用（GUI側でオーバーレイ表示を行う）
+        self._pie_active: bool = False
+        self._pie_scroll_prev_center_y: Optional[float] = None
+        self._pie_scroll_last_step_ms: int = 0
+        self._pie_open_streak: int = 0
+        self._pie_close_streak: int = 0
+        self._pie_pointer_contact_prev: bool = False
 
     @pyqtSlot(bool)
     def setPreviewEnabled(self, enabled: bool) -> None:
@@ -160,14 +169,75 @@ class VisionControlWorker(QThread):
                     time.sleep(0.2)
                     continue
 
-                det = self._detector.process(frame) if self._detector is not None else None
+                dual = self._detector.process(frame) if self._detector is not None else None
+
+                pointer_det = None
+                command_det = None
+                settings = self._store.get()
+                if dual is not None:
+                    pointer_det, command_det = self._assign_roles(dual, settings)
+
+                # PieMenuは「危険なOS操作」を明示的にONにしたときだけ出す（安全側の挙動）
+                # PieMenu表示条件（非利き手）:
+                # - 親指だけ => Preset 1
+                # - 人差し指だけ => Preset 2
+                # - 親指+人差し指 => Preset 3
+                command_open = False
+                command_preset = 0
+                if command_det is not None:
+                    thumb = bool(getattr(command_det, "thumb_extended", False))
+                    index = bool(getattr(command_det, "index_extended", False))
+                    middle = bool(getattr(command_det, "middle_extended", False))
+                    # ring/pinky は DetectionResult に無いので、finger_count を利用して「単指」を判定する
+                    fc = int(getattr(command_det, "finger_count", 0))
+
+                    # Preset 1: グー（指が1本も伸びていない）
+                    if fc == 0:
+                        command_open = True
+                        command_preset = 1
+                    # Preset 2: 人差し指だけ
+                    elif index and (not thumb) and (not middle) and fc == 1:
+                        command_open = True
+                        command_preset = 2
+                    # Preset 3: 親指 + 人差し指
+                    elif thumb and index and fc == 2:
+                        command_open = True
+                        command_preset = 3
+
+                # 手の検出は瞬断することがあるため、表示条件はラッチしてチラつきを抑える。
+                if command_open:
+                    self._pie_open_streak += 1
+                    self._pie_close_streak = 0
+                else:
+                    self._pie_close_streak += 1
+                    self._pie_open_streak = 0
+
+                open_need = 2  # 連続2フレームで「開く」を確定
+                close_need = 25  # 連続25フレームで「閉じる」を確定（両手操作中の瞬断を吸収）
+
+                if not control_enabled:
+                    pie_should_active = False
+                else:
+                    if not self._pie_active:
+                        pie_should_active = bool(command_open and self._pie_open_streak >= open_need)
+                    else:
+                        pie_should_active = bool(command_open or (self._pie_close_streak < close_need))
+
+                if pie_should_active != self._pie_active:
+                    self._pie_active = bool(pie_should_active)
+                    # 表示開始時はスクロール基準をリセット（プリセット切替の原点）
+                    self._pie_scroll_prev_center_y = None
+                    self._pie_scroll_last_step_ms = 0
 
                 ctrl_out = None
                 # Controllerは常に状態更新（dry-run可）し、GUIのデバッグ表示に使う。
                 # OSへの実操作（pyautogui）は control_enabled=True のときのみ。
-                if det is not None and self._controller is not None:
+                if pointer_det is not None and self._controller is not None:
                     try:
-                        ctrl_out = self._controller.update(det, apply_actions=bool(control_enabled))
+                        # PieMenu表示中はカーソルの「仮想中心固定」を優先するため、OS操作は抑止する。
+                        # 実行はPieMenu側（コマンド実行層）で行う。
+                        apply = bool(control_enabled) and (not self._pie_active)
+                        ctrl_out = self._controller.update(pointer_det, apply_actions=apply)
                     except Exception:
                         ctrl_out = None
 
@@ -179,12 +249,11 @@ class VisionControlWorker(QThread):
                     inst = 1.0 / dt
                     fps = (fps * 0.9) + (inst * 0.1) if fps > 0 else inst
 
-                if det is not None:
-                    settings = self._store.get()
+                if dual is not None:
                     anch = settings.control.cursor_anchoring
                     pre_contact = False
-                    if det.contact_distance is not None:
-                        pre_contact = bool(float(det.contact_distance) <= float(anch.pre_contact_threshold))
+                    if pointer_det is not None and pointer_det.contact_distance is not None:
+                        pre_contact = bool(float(pointer_det.contact_distance) <= float(anch.pre_contact_threshold))
 
                     dbg = {}
                     try:
@@ -200,17 +269,55 @@ class VisionControlWorker(QThread):
                         except Exception:
                             ctrl = {}
 
+                    # PieMenuの確定（クリック）:
+                    # クリック系のタップ判定は「操作のための姿勢変化」で取りこぼしやすいので、
+                    # PieMenu表示中は contact（pinch）の立ち上がりを「決定クリック」として扱う。
+                    pie_click = False
+                    if self._pie_active and pointer_det is not None:
+                        cur_contact = bool(getattr(pointer_det, "contact", False))
+                        pie_click = bool(cur_contact and (not self._pie_pointer_contact_prev))
+                        self._pie_pointer_contact_prev = bool(cur_contact)
+                    else:
+                        self._pie_pointer_contact_prev = False
+
+                    # プリセット切替は「中央クリック」に寄せる（スクロール切替は無効化）
+                    preset_step = 0
+
+                    self.pieMenuStateReady.emit(
+                        {
+                            "active": bool(self._pie_active),
+                            "pointer": {
+                                "handedness": getattr(pointer_det, "handedness", None) if pointer_det else None,
+                                "mode": getattr(pointer_det, "mode", "None") if pointer_det else "None",
+                                "pointer_xy": getattr(pointer_det, "pointer_xy", None) if pointer_det else None,
+                                "contact": bool(getattr(pointer_det, "contact", False)) if pointer_det else False,
+                                "left_clicked": bool(pie_click) if self._pie_active else (bool(ctrl.get("left_clicked")) if ctrl else False),
+                                "right_clicked": False,
+                            },
+                            "command": {
+                                "handedness": getattr(command_det, "handedness", None) if command_det else None,
+                                "mode": getattr(command_det, "mode", "None") if command_det else "None",
+                                "open": bool(command_open),
+                                "preset": int(command_preset),
+                            },
+                            "preset_step": int(preset_step),
+                        }
+                    )
+
                     self.statusReady.emit(
                         {
-                            "mode": det.mode,
-                            "finger_count": int(det.finger_count),
-                            "contact": bool(det.contact),
-                            "contact_distance": det.contact_distance,
+                            "pie_active": bool(self._pie_active),
+                            "pointer_handedness": getattr(pointer_det, "handedness", None) if pointer_det else None,
+                            "command_handedness": getattr(command_det, "handedness", None) if command_det else None,
+                            "mode": getattr(pointer_det, "mode", "None") if pointer_det else "None",
+                            "finger_count": int(getattr(pointer_det, "finger_count", 0)) if pointer_det else 0,
+                            "contact": bool(getattr(pointer_det, "contact", False)) if pointer_det else False,
+                            "contact_distance": getattr(pointer_det, "contact_distance", None) if pointer_det else None,
                             "pre_contact": bool(pre_contact),
-                            "latency_ms": det.latency_ms,
+                            "latency_ms": float(getattr(pointer_det, "latency_ms", 0.0)) if pointer_det else 0.0,
                             "fps": fps,
-                            "index_extended": bool(det.index_extended),
-                            "middle_extended": bool(det.middle_extended),
+                            "index_extended": bool(getattr(pointer_det, "index_extended", False)) if pointer_det else False,
+                            "middle_extended": bool(getattr(pointer_det, "middle_extended", False)) if pointer_det else False,
                             "control_enabled": bool(control_enabled),
                             "control": ctrl,
                             "controller": dbg,
@@ -218,15 +325,18 @@ class VisionControlWorker(QThread):
                     )
 
                 # プレビューは有効時のみ（負荷対策）
-                if preview_enabled and det is not None:
+                if preview_enabled and dual is not None:
                     view = frame.copy()
-                    _draw_landmarks_bgr(view, det.hand_landmarks)
+                    # 両手を描画（存在するものだけ）
+                    if dual.left is not None:
+                        _draw_landmarks_bgr(view, dual.left.hand_landmarks)
+                    if dual.right is not None:
+                        _draw_landmarks_bgr(view, dual.right.hand_landmarks)
                     # 簡易オーバーレイ
-                    settings = self._store.get()
                     anch = settings.control.cursor_anchoring
                     pre_contact = False
-                    if det.contact_distance is not None:
-                        pre_contact = bool(float(det.contact_distance) <= float(anch.pre_contact_threshold))
+                    if pointer_det is not None and pointer_det.contact_distance is not None:
+                        pre_contact = bool(float(pointer_det.contact_distance) <= float(anch.pre_contact_threshold))
 
                     dbg = {}
                     try:
@@ -235,9 +345,14 @@ class VisionControlWorker(QThread):
                     except Exception:
                         dbg = {}
 
-                    line1 = f"mode={det.mode}  fps={fps:.1f}  lat={det.latency_ms:.1f}ms"
+                    line1 = (
+                        f"pie={int(bool(self._pie_active))} "
+                        f"ptr={getattr(pointer_det, 'handedness', None)} "
+                        f"cmd={getattr(command_det, 'handedness', None)} "
+                        f"mode={getattr(pointer_det, 'mode', 'None')}  fps={fps:.1f}  lat={float(getattr(pointer_det, 'latency_ms', 0.0)):.1f}ms"
+                    )
                     line2 = (
-                        f"c={int(bool(det.contact))} pre={int(bool(pre_contact))} "
+                        f"c={int(bool(getattr(pointer_det, 'contact', False)))} pre={int(bool(pre_contact))} "
                         f"pose={int(bool(dbg.get('click_pose_active')))} "
                         f"drag={int(bool(dbg.get('dragging')))} "
                         f"freeze={int(bool(dbg.get('anchoring_freeze')))} "
@@ -298,6 +413,74 @@ class VisionControlWorker(QThread):
         except Exception:
             pass
         self._cap = None
+
+    @staticmethod
+    def _pick_fallback(primary, secondary):
+        return primary if primary is not None else secondary
+
+    def _assign_roles(self, dual: DualHandResult, settings: Settings):
+        """利き手設定に基づき、pointer(利き手)とcommand(非利き手)を返す。"""
+
+        dom = str(getattr(settings, "dominant_hand", "right")).strip().lower()
+        if dom == "left":
+            # 役割混線を防ぐため、handednessが確定した側だけを採用する（フォールバックしない）
+            pointer = dual.left
+            command = dual.right
+        else:
+            pointer = dual.right
+            command = dual.left
+        return pointer, command
+
+    @staticmethod
+    def _palm_center_y_from_landmarks(hand_landmarks) -> Optional[float]:
+        if hand_landmarks is None:
+            return None
+        lm = hand_landmarks
+        try:
+            return float((lm[0].y + lm[5].y + lm[17].y) / 3.0)
+        except Exception:
+            return None
+
+    def _compute_preset_step(self, det, settings: Settings, now_ms: int) -> int:
+        """PieMenu表示中の利き手スクロールを、プリセット切替ステップへ変換する。
+
+        仕様:
+        - OSスクロールは行わず、上下移動に応じて preset を循環切替する。
+        - フレーム揺れで連打にならないよう、しきい値＋クールダウンを設ける。
+        """
+
+        # 防御: 利き手（dominant_hand）以外のScrollではプリセットを切り替えない
+        dom = str(getattr(settings, "dominant_hand", "right")).strip().lower()
+        need = "Left" if dom == "left" else "Right"
+        if str(getattr(det, "handedness", "")) != need:
+            self._pie_scroll_prev_center_y = None
+            return 0
+
+        center_y = self._palm_center_y_from_landmarks(getattr(det, "hand_landmarks", None))
+        if center_y is None:
+            self._pie_scroll_prev_center_y = None
+            return 0
+
+        if self._pie_scroll_prev_center_y is None:
+            self._pie_scroll_prev_center_y = float(center_y)
+            return 0
+
+        dy = float(center_y) - float(self._pie_scroll_prev_center_y)
+        self._pie_scroll_prev_center_y = float(center_y)
+
+        # 1回の切替に必要な移動量（正規化）。大きめにして意図的な操作のみ拾う。
+        step_th = 0.03
+        cooldown_ms = 180
+        if now_ms - int(self._pie_scroll_last_step_ms) < cooldown_ms:
+            return 0
+
+        if dy <= -step_th:
+            self._pie_scroll_last_step_ms = int(now_ms)
+            return +1
+        if dy >= step_th:
+            self._pie_scroll_last_step_ms = int(now_ms)
+            return -1
+        return 0
 
 
 class QMutexLocker:

@@ -9,6 +9,7 @@ camera:
     y: 0.1
     w: 0.7
     h: 0.8
+dominant_hand: right
 detection:
   min_detection_confidence: 0.6
   min_tracking_confidence: 0.6
@@ -26,7 +27,7 @@ control:
   drag_contact_release_frames: 5
   mouse_mode_stable_frames: 6
   relative_move_deadzone: 0.0
-  relative_move_clamp_th: 0.12
+  relative_move_clamp_th: 0.15000000000000002
   scroll_sensitivity: 20
   scroll_deadzone: 0.004
   click_requires_middle_bent: true
@@ -36,6 +37,76 @@ control:
     pre_contact_threshold: 0.06
     freeze_frames: 3
     override_smoothing_factor_ema: 0.05
+pie_menu:
+  presets:
+    custom_1:
+      slots:
+        1:
+          label: ''
+          type: shortcut
+          value: ''
+        2:
+          label: ''
+          type: shortcut
+          value: ''
+        3:
+          label: ''
+          type: shortcut
+          value: ''
+        4:
+          label: ''
+          type: shortcut
+          value: ''
+        5:
+          label: ''
+          type: shortcut
+          value: ''
+        6:
+          label: ''
+          type: shortcut
+          value: ''
+        7:
+          label: ''
+          type: shortcut
+          value: ''
+        8:
+          label: ''
+          type: shortcut
+          value: ''
+    custom_3:
+      slots:
+        1:
+          label: ''
+          type: shortcut
+          value: ''
+        2:
+          label: ''
+          type: shortcut
+          value: ''
+        3:
+          label: ''
+          type: shortcut
+          value: ''
+        4:
+          label: ''
+          type: shortcut
+          value: ''
+        5:
+          label: ''
+          type: shortcut
+          value: ''
+        6:
+          label: ''
+          type: shortcut
+          value: ''
+        7:
+          label: ''
+          type: shortcut
+          value: ''
+        8:
+          label: ''
+          type: shortcut
+          value: ''
 logging:
   log_dir: logs
   log_file_name: events.jsonl

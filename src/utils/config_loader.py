@@ -102,6 +102,35 @@ class LoggingConfig:
 
 
 @dataclass(frozen=True)
+class PieMenuSlot:
+    """PieMenuの1スロット設定。
+
+    研究用途の意図:
+    - GUIから即時に更新される前提のため、1スロットを独立した小さな設定単位として扱う。
+    - 保存形式を単純に保ち、将来の互換（項目追加）に備える。
+    """
+
+    label: str
+    type: str  # "shortcut" | "application"
+    value: str
+
+
+@dataclass(frozen=True)
+class PieMenuPreset:
+    """PieMenuのプリセット（8スロット）。"""
+
+    slots: Tuple[PieMenuSlot, ...]  # 常に長さ8
+
+
+@dataclass(frozen=True)
+class PieMenuConfig:
+    """PieMenu設定全体。"""
+
+    custom_1: PieMenuPreset
+    custom_3: PieMenuPreset
+
+
+@dataclass(frozen=True)
 class Settings:
     """設定の不変スナップショット。
 
@@ -110,9 +139,11 @@ class Settings:
     - 書き手は更新のたびにスナップショットを丸ごと差し替える（ロック範囲を最小化しやすい）。
     """
 
+    dominant_hand: str  # "right" | "left"
     camera: CameraConfig
     detection: DetectionConfig
     control: ControlConfig
+    pie_menu: PieMenuConfig
     logging: LoggingConfig
 
 
@@ -217,6 +248,76 @@ def _validate_roi(roi: Dict[str, Any]) -> CameraROI:
     return CameraROI(enabled=enabled, x=x, y=y, w=w, h=h)
 
 
+def _validate_dominant_hand(raw: Dict[str, Any]) -> str:
+    """利き手設定（right/left）を検証して返す。"""
+
+    v = raw.get("dominant_hand", "right")
+    s = _as_str(v, name="dominant_hand").strip().lower()
+    if s not in ("right", "left"):
+        raise ValueError("dominant_hand は 'right' または 'left' である必要があります")
+    return s
+
+
+def _validate_pie_menu_slot(obj: Any, *, name: str) -> PieMenuSlot:
+    """PieMenuスロットを検証する。
+
+    許容仕様:
+    - type: shortcut/application
+    - label/value: 空文字も許容（未設定スロットのため）
+    """
+
+    if obj is None:
+        obj = {}
+    if not isinstance(obj, dict):
+        raise ValueError(f"{name} はdictである必要があります")
+
+    label = str(obj.get("label", ""))
+    value = str(obj.get("value", ""))
+    typ = str(obj.get("type", "shortcut")).strip().lower()
+    if typ not in ("shortcut", "application"):
+        raise ValueError(f"{name}.type は 'shortcut' または 'application' である必要があります")
+    return PieMenuSlot(label=label, type=typ, value=value)
+
+
+def _validate_pie_menu_preset(obj: Any, *, name: str) -> PieMenuPreset:
+    """PieMenuプリセット（8スロット）を検証する。"""
+
+    if obj is None:
+        obj = {}
+    if not isinstance(obj, dict):
+        raise ValueError(f"{name} はdictである必要があります")
+
+    slots_raw = obj.get("slots", {})
+    if slots_raw is None:
+        slots_raw = {}
+    if not isinstance(slots_raw, dict):
+        raise ValueError(f"{name}.slots はdictである必要があります")
+
+    slots: List[PieMenuSlot] = []
+    for i in range(1, 9):
+        slot_obj = slots_raw.get(str(i)) if str(i) in slots_raw else slots_raw.get(i)
+        slots.append(_validate_pie_menu_slot(slot_obj, name=f"{name}.slots.{i}"))
+    return PieMenuPreset(slots=tuple(slots))
+
+
+def _validate_pie_menu(raw: Dict[str, Any]) -> PieMenuConfig:
+    pm = raw.get("pie_menu", {})
+    if pm is None:
+        pm = {}
+    if not isinstance(pm, dict):
+        raise ValueError("pie_menu はdictである必要があります")
+
+    presets = pm.get("presets", {})
+    if presets is None:
+        presets = {}
+    if not isinstance(presets, dict):
+        raise ValueError("pie_menu.presets はdictである必要があります")
+
+    custom_1 = _validate_pie_menu_preset(presets.get("custom_1", {}), name="pie_menu.presets.custom_1")
+    custom_3 = _validate_pie_menu_preset(presets.get("custom_3", {}), name="pie_menu.presets.custom_3")
+    return PieMenuConfig(custom_1=custom_1, custom_3=custom_3)
+
+
 def _validate_settings_dict(raw: Dict[str, Any]) -> Settings:
     """YAML辞書からSettingsスナップショットへ変換しつつ検証する。
 
@@ -228,6 +329,8 @@ def _validate_settings_dict(raw: Dict[str, Any]) -> Settings:
     detection = raw.get("detection", {})
     control = raw.get("control", {})
     logging = raw.get("logging", {})
+    dominant_hand = _validate_dominant_hand(raw)
+    pie_menu_cfg = _validate_pie_menu(raw)
 
     roi = _validate_roi(camera.get("roi", {}))
     camera_cfg = CameraConfig(
@@ -324,7 +427,14 @@ def _validate_settings_dict(raw: Dict[str, Any]) -> Settings:
         flush=_as_bool(logging.get("flush", True), name="logging.flush"),
     )
 
-    return Settings(camera=camera_cfg, detection=det_cfg, control=ctl_cfg, logging=log_cfg)
+    return Settings(
+        dominant_hand=dominant_hand,
+        camera=camera_cfg,
+        detection=det_cfg,
+        control=ctl_cfg,
+        pie_menu=pie_menu_cfg,
+        logging=log_cfg,
+    )
 
 
 class ConfigStore:
