@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 
 from PyQt6.QtWidgets import QApplication
@@ -14,6 +15,18 @@ from src.utils.config_loader import ConfigStore
 
 
 def main() -> int:
+    # Windows: ターミナル出力の日本語が文字化けしやすい（コードページ差）
+    # PowerShell / Windows Terminal 側が UTF-8 のときに合わせ、stdout/stderr を UTF-8 に寄せる。
+    if os.name == "nt":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
     app = QApplication(sys.argv)
 
     store = ConfigStore()
