@@ -6,11 +6,12 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import pyautogui
-from PyQt6.QtCore import Qt, QRectF, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+from PyQt6.QtCore import Qt, QTimer, QRectF, pyqtSignal
+from PyQt6.QtGui import QColor, QCursor, QFont, QGuiApplication, QPainter, QPen
 from PyQt6.QtWidgets import QApplication, QWidget
 
 from src.utils.config_loader import ConfigStore, PieMenuSlot
+from src.utils.macos_overlay import apply_fullscreen_auxiliary_collection_behavior
 from src.core.media_preset import media_actions_by_id
 
 
@@ -71,6 +72,12 @@ class PieMenuOverlay(QWidget):
 
         # サイズは固定（描画を単純にする）。必要なら後で設定化できる。
         self.resize(520, 520)
+        # プラットフォームウィンドウ生成後に macOS のフルスクリーン空間へ追従させる
+        try:
+            _ = int(self.winId())
+        except Exception:
+            pass
+        apply_fullscreen_auxiliary_collection_behavior(self)
 
     def is_active(self) -> bool:
         return bool(self._active)
@@ -101,6 +108,9 @@ class PieMenuOverlay(QWidget):
             self._move_to_screen_center_and_warp_center()
             self._apply_active_state()
             self.show()
+            apply_fullscreen_auxiliary_collection_behavior(self)
+            # 1フレーム遅延でもう一度（NSWindow 生成タイミング差の吸収）
+            QTimer.singleShot(0, lambda: apply_fullscreen_auxiliary_collection_behavior(self))
             # raise_() は環境によってアプリが前面化し、操作対象のアプリからフォーカスが奪われることがあるため避ける
         else:
             self._pointer_origin_xy = None
@@ -242,7 +252,9 @@ class PieMenuOverlay(QWidget):
     def _move_to_screen_center_and_warp_center(self) -> None:
         """PieMenuを画面中央へ固定表示し、カーソルも中央へワープする。"""
 
-        scr = QApplication.primaryScreen()
+        scr = QGuiApplication.screenAt(QCursor.pos())
+        if scr is None:
+            scr = QApplication.primaryScreen()
         geo = scr.availableGeometry() if scr is not None else None
         scx = int(geo.center().x()) if geo is not None else 0
         scy = int(geo.center().y()) if geo is not None else 0

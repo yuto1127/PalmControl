@@ -5,3 +5,4 @@ pynput
 PyQt6
 PyYAML
 pytest
+pyobjc-framework-Cocoa>=10.0; sys_platform == "darwin"

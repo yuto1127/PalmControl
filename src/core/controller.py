@@ -557,7 +557,12 @@ class MouseController:
             self._contact_on_ms = None
 
         # 接触継続中：一定時間以上ならドラッグ開始
-        if contact and not self._dragging and self._contact_on_ms is not None:
+        #
+        # 重要:
+        # - `apply_actions=False`（dry-run）でも内部状態は更新される設計だが、
+        #   ここでドラッグ状態だけを立てると、タップ履歴が破棄され「連続ピンチのクリック確定」が成立しなくなる。
+        # - PieMenu表示中など、OS操作を抑止している間はドラッグ開始を行わない。
+        if apply_actions and contact and not self._dragging and self._contact_on_ms is not None:
             hold_ms = now_ms - self._contact_on_ms
             if hold_ms > drag_hold_ms:
                 self._mouse_down_left(apply_actions=apply_actions)
