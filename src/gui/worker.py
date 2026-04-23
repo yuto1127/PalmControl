@@ -10,6 +10,7 @@ from PyQt6.QtGui import QImage
 
 from src.core.controller import MouseController
 from src.core.detector import DualHandResult, HandDetector
+from src.utils.camera import open_camera
 from src.utils.config_loader import ConfigStore, Settings
 from src.utils.logger import LoggingManager
 
@@ -109,6 +110,7 @@ class VisionControlWorker(QThread):
         self._detector: Optional[HandDetector] = None
         self._controller: Optional[MouseController] = None
         self._cap: Optional[cv2.VideoCapture] = None
+        self._last_capture_error_ms: int = 0
 
         # PieMenu連携用（GUI側でオーバーレイ表示を行う）
         self._pie_active: bool = False
@@ -165,6 +167,15 @@ class VisionControlWorker(QThread):
 
                 ok, frame = self._cap.read()
                 if not ok or frame is None:
+                    now_ms = int(time.time() * 1000)
+                    # 取得失敗時のログはスパム回避のため2秒間隔で出す。
+                    if (now_ms - self._last_capture_error_ms) >= 2000:
+                        self._last_capture_error_ms = now_ms
+                        self._log_event(
+                            "WARN",
+                            "camera.read_failed",
+                            {"reason": "cap.read returned empty frame"},
+                        )
                     self.error.emit("フレームを取得できませんでした（カメラ権限/接続を確認）。")
                     time.sleep(0.2)
                     continue
@@ -398,15 +409,40 @@ class VisionControlWorker(QThread):
 
     def _open_camera(self, settings: Settings) -> None:
         self._close_camera()
-        cap = cv2.VideoCapture(settings.camera.device_id)
-        if not cap.isOpened():
+        opened = open_camera(settings.camera.device_id)
+        cap = opened.cap
+        if cap is None or (not cap.isOpened()):
             self._cap = None
-            self.error.emit("カメラを開けませんでした（device_id/権限/占有を確認）。")
+            tried = ", ".join(opened.tried_backends) if opened.tried_backends else "default"
+            self._log_event(
+                "ERROR",
+                "camera.open_failed",
+                {
+                    "device_id": int(settings.camera.device_id),
+                    "tried_backends": list(opened.tried_backends),
+                },
+            )
+            self.error.emit(
+                f"カメラを開けませんでした（device_id/権限/占有を確認）。試行バックエンド: {tried}"
+            )
             return
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, float(settings.camera.width))
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, float(settings.camera.height))
         cap.set(cv2.CAP_PROP_FPS, float(settings.camera.fps))
         self._cap = cap
+        self._log_event(
+            "INFO",
+            "camera.opened",
+            {
+                "device_id": int(settings.camera.device_id),
+                "backend": opened.backend_name,
+                "tried_backends": list(opened.tried_backends),
+                "requested_width": int(settings.camera.width),
+                "requested_height": int(settings.camera.height),
+                "requested_fps": int(settings.camera.fps),
+            },
+        )
+        self._last_capture_error_ms = 0
 
     def _close_camera(self) -> None:
         try:
@@ -415,6 +451,13 @@ class VisionControlWorker(QThread):
         except Exception:
             pass
         self._cap = None
+
+    def _log_event(self, level: str, event: str, data: dict) -> None:
+        try:
+            if self._log_manager is not None:
+                self._log_manager.logger.write(level, event, data)
+        except Exception:
+            pass
 
     @staticmethod
     def _pick_fallback(primary, secondary):

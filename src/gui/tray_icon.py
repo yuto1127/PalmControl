@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon
-from PyQt6.QtWidgets import QMenu, QSystemTrayIcon
+from PyQt6.QtWidgets import QApplication, QMenu, QStyle, QSystemTrayIcon
 
 
 class TrayIcon(QSystemTrayIcon):
@@ -13,8 +13,12 @@ class TrayIcon(QSystemTrayIcon):
     exitRequested = pyqtSignal()
 
     def __init__(self, parent: QObject | None = None) -> None:
-        # アイコンは最小実装として標準テーマに委ねる（後で差し替え可）
-        super().__init__(QIcon(), parent)
+        # Windowsでは空アイコンだと表示されないため、標準アイコンを必ず設定する。
+        fallback_icon = QIcon()
+        app = QApplication.instance()
+        if app is not None:
+            fallback_icon = app.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+        super().__init__(fallback_icon, parent)
         self.setToolTip("PalmControl")
 
         menu = QMenu()

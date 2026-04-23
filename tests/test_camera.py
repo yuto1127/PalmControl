@@ -14,6 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.utils.config_loader import get_config_store
+from src.utils.camera import open_camera
 
 
 def main() -> int:
@@ -32,15 +33,20 @@ def main() -> int:
     store = get_config_store("config/settings.yaml")
     cfg = store.get().camera
 
-    cap = cv2.VideoCapture(cfg.device_id)
-    if not cap.isOpened():
+    opened = open_camera(cfg.device_id)
+    cap = opened.cap
+    if cap is None or (not cap.isOpened()):
+        tried = ", ".join(opened.tried_backends) if opened.tried_backends else "default"
         print(
             "カメラを開けませんでした。\n"
             "- device_idの確認\n"
-            "- macOSのカメラ権限（プライバシーとセキュリティ）\n"
+            "- Windowsの場合: カメラのプライバシー設定（アプリのカメラアクセス）\n"
+            "- macOSの場合: カメラ権限（プライバシーとセキュリティ）\n"
             "- 他アプリがカメラを占有していないか\n"
+            f"- 試行バックエンド: {tried}\n"
         )
         return 1
+    print(f"camera backend: {opened.backend_name} (tried: {', '.join(opened.tried_backends)})")
 
     # 要求値を設定（デバイスやドライバによっては反映されないことがある）
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, float(cfg.width))
@@ -53,10 +59,10 @@ def main() -> int:
     print("プレビュー開始: 終了は 'q' キー")
     while True:
         ok, frame = cap.read()
-        frame = cv2.flip(frame, 1)
         if not ok or frame is None:
             print("フレームを取得できませんでした。権限や接続を確認してください。")
             break
+        frame = cv2.flip(frame, 1)
 
         now = time.perf_counter()
         dt = now - prev_t

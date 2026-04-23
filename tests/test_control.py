@@ -20,6 +20,7 @@ os.environ.setdefault("MEDIAPIPE_DISABLE_GPU", "1")
 
 from src.core.controller import MouseController  # noqa: E402
 from src.core.detector import HandDetector  # noqa: E402
+from src.utils.camera import open_camera  # noqa: E402
 from src.utils.config_loader import get_config_store  # noqa: E402
 from src.utils.logger import LoggingManager  # noqa: E402
 
@@ -50,9 +51,11 @@ def main() -> int:
     listener = keyboard.Listener(on_press=on_press)
     listener.start()
 
-    cap = cv2.VideoCapture(settings.camera.device_id)
-    if not cap.isOpened():
-        print("カメラを開けませんでした。device_idや権限を確認してください。")
+    opened = open_camera(settings.camera.device_id)
+    cap = opened.cap
+    if cap is None or (not cap.isOpened()):
+        tried = ", ".join(opened.tried_backends) if opened.tried_backends else "default"
+        print(f"カメラを開けませんでした。device_idや権限を確認してください。試行: {tried}")
         stop_event.set()
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, float(settings.camera.width))

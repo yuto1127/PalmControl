@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 from typing import Any, Optional, Tuple
+from urllib.error import URLError
+from urllib.request import urlretrieve
 
 from src.utils.config_loader import ConfigStore, Settings, get_config_store
 from src.utils.logger import JsonPrependLogger
@@ -19,6 +21,10 @@ import mediapipe as mp
 
 
 DEFAULT_HAND_MODEL_PATH = Path("models/hand_landmarker.task")
+DEFAULT_HAND_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
+    "hand_landmarker/float16/1/hand_landmarker.task"
+)
 
 
 @dataclass(frozen=True)
@@ -162,11 +168,13 @@ class HandDetector:
         """HandLandmarker(Task API)を構築する。"""
 
         if not self._model_path.exists():
+            self._download_model_if_missing()
+        if not self._model_path.exists():
             raise FileNotFoundError(
                 "HandLandmarkerのモデルファイルが見つかりません。\n"
                 f"- 期待パス: {self._model_path}\n"
-                "次のURLから `hand_landmarker.task` をダウンロードして `models/` に配置してください。\n"
-                "- URL: https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task\n"
+                "ネットワーク接続後に再起動するか、次のURLから手動配置してください。\n"
+                f"- URL: {DEFAULT_HAND_MODEL_URL}\n"
             )
 
         BaseOptions = mp.tasks.BaseOptions
@@ -186,6 +194,15 @@ class HandDetector:
             min_tracking_confidence=float(settings.detection.min_tracking_confidence),
         )
         return HandLandmarker.create_from_options(options)
+
+    def _download_model_if_missing(self) -> None:
+        """モデル未配置時に自動ダウンロードを試みる。"""
+        try:
+            self._model_path.parent.mkdir(parents=True, exist_ok=True)
+            urlretrieve(DEFAULT_HAND_MODEL_URL, self._model_path)  # nosec: trusted public model asset
+        except (URLError, OSError):
+            # 失敗時は後段で明示エラーを出す。
+            pass
 
     def _analyze_mediapipe_result_multi(self, mp_result, settings: Settings, *, dt_ms: float) -> DualHandResult:
         """MediaPipeのmulti-hand出力を左右手へ正規化する。"""

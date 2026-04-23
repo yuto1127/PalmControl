@@ -29,6 +29,14 @@ call ".venv\Scripts\activate.bat"
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
+echo [PalmControl] カメラ事前診断を実行します
+python tests\probe_camera.py
+if errorlevel 1 (
+  echo [PalmControl] カメラ事前診断に失敗しました。設定や占有状態を確認してください。
+  echo [PalmControl] Enterで続行、Ctrl+Cで中断できます。
+  pause >nul
+)
+
 echo [PalmControl] アプリを起動します
 python -m src.main
 
