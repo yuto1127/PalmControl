@@ -127,6 +127,7 @@ class PieMenuConfig:
     """PieMenu設定全体。"""
 
     click_threshold: float
+    preset2_layout: Tuple[str, ...]  # 長さ8（Preset 2のスロット配置）
     custom_1: PieMenuPreset
     custom_3: PieMenuPreset
 
@@ -302,6 +303,8 @@ def _validate_pie_menu_preset(obj: Any, *, name: str) -> PieMenuPreset:
 
 
 def _validate_pie_menu(raw: Dict[str, Any]) -> PieMenuConfig:
+    from src.core.media_preset import default_media_layout, validate_media_layout
+
     pm = raw.get("pie_menu", {})
     if pm is None:
         pm = {}
@@ -319,7 +322,21 @@ def _validate_pie_menu(raw: Dict[str, Any]) -> PieMenuConfig:
     click_th = _as_float(pm.get("click_threshold", 0.085), name="pie_menu.click_threshold")
     if not (0.0 <= float(click_th) <= 0.2):
         raise ValueError("pie_menu.click_threshold は 0.0〜0.2 の範囲である必要があります")
-    return PieMenuConfig(click_threshold=float(click_th), custom_1=custom_1, custom_3=custom_3)
+
+    layout_raw = pm.get("preset2_layout", None)
+    if layout_raw is None:
+        layout = default_media_layout()
+    else:
+        if not isinstance(layout_raw, list):
+            raise ValueError("pie_menu.preset2_layout はlistである必要があります")
+        layout = validate_media_layout([str(x) for x in layout_raw])
+
+    return PieMenuConfig(
+        click_threshold=float(click_th),
+        preset2_layout=tuple(layout),
+        custom_1=custom_1,
+        custom_3=custom_3,
+    )
 
 
 def _validate_settings_dict(raw: Dict[str, Any]) -> Settings:

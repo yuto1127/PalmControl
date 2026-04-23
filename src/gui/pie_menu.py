@@ -11,6 +11,7 @@ from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import QApplication, QWidget
 
 from src.utils.config_loader import ConfigStore, PieMenuSlot
+from src.core.media_preset import media_actions_by_id
 
 
 @dataclass(frozen=True)
@@ -276,18 +277,10 @@ class PieMenuOverlay(QWidget):
             return s.pie_menu.custom_3.slots[int(slot) - 1]
         # preset 2 は固定表示（ここではラベルのみ返す）
         if int(preset) == 2:
-            fixed = [
-                ("Vol +", "shortcut", ""),
-                ("Vol -", "shortcut", ""),
-                ("Next", "shortcut", ""),
-                ("Prev", "shortcut", ""),
-                ("Play/Pause", "shortcut", ""),
-                ("Mute", "shortcut", ""),
-                ("-10s", "shortcut", ""),
-                ("+10s", "shortcut", ""),
-            ]
-            lab, typ, val = fixed[int(slot) - 1]
-            return PieMenuSlot(label=lab, type=typ, value=val)
+            ids = list(getattr(s.pie_menu, "preset2_layout"))
+            act_id = str(ids[int(slot) - 1])
+            act = media_actions_by_id()[act_id]
+            return PieMenuSlot(label=act.label, type=act.type, value=act.value)
         return s.pie_menu.custom_1.slots[int(slot) - 1]
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
@@ -315,13 +308,15 @@ class PieMenuOverlay(QWidget):
         for i in range(8):
             slot = i + 1
             is_sel = bool(self._selection is not None and int(self._selection.slot) == int(slot))
+            center_deg = float(i * 45.0)
             # 選択中は「扇形全体」を青でハイライトする
             if is_sel:
                 fill = QColor(0, 140, 255, 110)
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(fill)
                 # QtのdrawPieは 1/16度単位、0度は3時方向、正は反時計回り
-                start_deg = float(i * 45.0)
+                # スロット中心が上下左右/斜めに揃うよう、扇形を22.5°回転させる
+                start_deg = float(center_deg - 22.5)
                 span_deg = 45.0
                 painter.drawPie(outer_rect, int(start_deg * 16), int(span_deg * 16))
 
@@ -332,16 +327,9 @@ class PieMenuOverlay(QWidget):
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
 
-            # セクタ境界線（中心から外周へ）
-            ang_deg = (i * 45.0)
-            ang = math.radians(ang_deg)
-            x2 = cx + math.cos(ang) * radius
-            y2 = cy - math.sin(ang) * radius
-            painter.drawLine(int(cx), int(cy), int(x2), int(y2))
-
             # ラベル（セクタの中央）
-            mid_deg = ang_deg + 22.5
-            mid = math.radians(mid_deg)
+            # 0/90/180/270 が上下左右になるよう中心角をそのまま使う
+            mid = math.radians(center_deg)
             tx = cx + math.cos(mid) * (radius * 0.72)
             ty = cy - math.sin(mid) * (radius * 0.72)
 
@@ -354,6 +342,17 @@ class PieMenuOverlay(QWidget):
             f.setBold(bool(is_sel))
             painter.setFont(f)
             painter.drawText(int(tx - 48), int(ty - 12), 96, 24, int(Qt.AlignmentFlag.AlignCenter), text)
+
+        # セクタ境界線（中心から外周へ）
+        # 境界を 22.5° ずらし、中心が上下左右/斜めに揃うようにする
+        painter.setPen(QPen(QColor(255, 255, 255, 90), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for k in range(8):
+            ang_deg = float(k * 45.0 + 22.5)
+            ang = math.radians(ang_deg)
+            x2 = cx + math.cos(ang) * radius
+            y2 = cy - math.sin(ang) * radius
+            painter.drawLine(int(cx), int(cy), int(x2), int(y2))
 
         # 内円（中央表示領域）
         painter.setPen(QPen(QColor(255, 255, 255, 140), 2))

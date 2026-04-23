@@ -5,6 +5,7 @@ import sys
 from PyQt6.QtWidgets import QApplication
 
 from src.core.command_executor import CommandExecutor, CommandSpec
+from src.core.media_preset import media_actions_by_id
 from src.gui.main_window import MainWindow
 from src.gui.pie_menu import PieMenuOverlay
 from src.gui.tray_icon import TrayIcon
@@ -30,19 +31,10 @@ def main() -> int:
         slot = int(slot)
 
         if preset == 2:
-            fixed = [
-                # YouTube（ブラウザ）で確実に効くキー割当（フォーカスが動画側にある前提）
-                # 音量だけはOS側を直接変更（macOSはosascriptで安定）
-                CommandSpec(label="Vol +", type="shortcut", value="volumeup"),
-                CommandSpec(label="Vol -", type="shortcut", value="volumedown"),
-                CommandSpec(label="Next", type="shortcut", value="shift+n"),
-                CommandSpec(label="Prev", type="shortcut", value="shift+p"),
-                CommandSpec(label="Play/Pause", type="shortcut", value="k"),
-                CommandSpec(label="Mute", type="shortcut", value="volumemute"),
-                CommandSpec(label="-10s", type="shortcut", value="j"),
-                CommandSpec(label="+10s", type="shortcut", value="l"),
-            ]
-            return fixed[slot - 1]
+            ids = list(getattr(s.pie_menu, "preset2_layout"))
+            act_id = str(ids[slot - 1])
+            act = media_actions_by_id()[act_id]
+            return CommandSpec(label=act.label, type=act.type, value=act.value)
 
         if preset == 3:
             sl = s.pie_menu.custom_3.slots[slot - 1]

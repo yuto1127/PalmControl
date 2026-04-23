@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
 
 from src.gui.worker import VisionControlWorker
 from src.utils.config_loader import ConfigStore
+from src.core.media_preset import MEDIA_ACTIONS
 
 
 class _AspectFitPixmapLabel(QWidget):
@@ -309,7 +310,11 @@ class MainWindow(QMainWindow):
         sx.setRange(0.1, 6.0)
         sx.setSingleStep(0.1)
         sx.setValue(float(s.control.sensitivity_x))
-        sx.setToolTip("左右方向のマウス移動感度です。大きいほど少ない手移動でカーソルが動きます。")
+        sx.setToolTip(
+            "左右方向のマウス移動感度です。\n"
+            "- 大きい: 少ない手移動で大きく動く（速い/暴れやすい）\n"
+            "- 小さい: 細かい操作がしやすい（端まで届きにくい）"
+        )
         sx.valueChanged.connect(lambda v: self._set_value("control.sensitivity_x", float(v)))
         layout.addRow("マウス感度（左右）", sx)
 
@@ -317,7 +322,11 @@ class MainWindow(QMainWindow):
         sy.setRange(0.1, 6.0)
         sy.setSingleStep(0.1)
         sy.setValue(float(s.control.sensitivity_y))
-        sy.setToolTip("上下方向のマウス移動感度です。大きいほど少ない手移動でカーソルが動きます。")
+        sy.setToolTip(
+            "上下方向のマウス移動感度です。\n"
+            "- 大きい: 少ない手移動で大きく動く（速い/暴れやすい）\n"
+            "- 小さい: 細かい操作がしやすい（端まで届きにくい）"
+        )
         sy.valueChanged.connect(lambda v: self._set_value("control.sensitivity_y", float(v)))
         layout.addRow("マウス感度（上下）", sy)
 
@@ -325,7 +334,12 @@ class MainWindow(QMainWindow):
         sf.setRange(0.01, 1.0)
         sf.setSingleStep(0.05)
         sf.setValue(float(s.control.smoothing_factor))
-        sf.setToolTip("ポインタ座標の平滑化（EMA）係数です。大きいほど追従性が高く、小さいほど滑らかになります。")
+        sf.setToolTip(
+            "平滑化（EMA）係数です。\n"
+            "- 大きい: 追従が速い（震えが出やすい）\n"
+            "- 小さい: 滑らか（遅延/もっさりしやすい）\n"
+            "カクつく場合は 0.35→0.45 など少し上げると改善することがあります。"
+        )
         sf.valueChanged.connect(lambda v: self._set_value("control.smoothing_factor", float(v)))
         layout.addRow("スムージング係数", sf)
 
@@ -333,7 +347,11 @@ class MainWindow(QMainWindow):
         ct.setRange(0.0, 0.2)
         ct.setSingleStep(0.005)
         ct.setValue(float(s.control.click_threshold))
-        ct.setToolTip("親指と指先の距離がこの値以下で「接触（クリック候補）」と判定します。")
+        ct.setToolTip(
+            "接触（pinch）判定の距離しきい値です。\n"
+            "- 大きい: 浅いつまみでもON（誤判定も増えやすい）\n"
+            "- 小さい: しっかりつままないとON（誤判定は減る）"
+        )
         ct.valueChanged.connect(lambda v: self._set_value("control.click_threshold", float(v)))
         layout.addRow("クリックしきい値", ct)
 
@@ -341,7 +359,11 @@ class MainWindow(QMainWindow):
         pre.setRange(0.0, 0.3)
         pre.setSingleStep(0.005)
         pre.setValue(float(s.control.cursor_anchoring.pre_contact_threshold))
-        pre.setToolTip("接触の手前（予兆）でカーソルを固定し始める距離です。大きいほど早く固定します。")
+        pre.setToolTip(
+            "アンカリング（クリック時の固定）開始の距離しきい値です。\n"
+            "- 大きい: 早い段階で固定（クリックは安定/通常移動が止まりやすい）\n"
+            "- 小さい: 固定が遅い（通常移動は軽い/クリック時にズレやすい）"
+        )
         pre.valueChanged.connect(lambda v: self._set_value("control.cursor_anchoring.pre_contact_threshold", float(v)))
         layout.addRow("固定開始（予兆）しきい値", pre)
 
@@ -356,8 +378,9 @@ class MainWindow(QMainWindow):
         dh.setRange(50, 3000)
         dh.setValue(int(getattr(s.control, "drag_hold_ms", s.control.tap_interval_ms)))
         dh.setToolTip(
-            "接触（pinch）をこの時間以上 유지するとドラッグ開始（mouseDown）になります。"
-            "確定後はドラッグ中のカーソル移動が有効になり、範囲選択ができます。"
+            "ドラッグ開始（長押し）の時間（ms）です。\n"
+            "- 大きい: ドラッグ誤発火が減る（ドラッグ開始が遅い）\n"
+            "- 小さい: すぐドラッグ開始（クリックしたいのにドラッグになりやすい）"
         )
         dh.valueChanged.connect(lambda v: self._set_value("control.drag_hold_ms", int(v)))
         layout.addRow("ドラッグ開始（長押しms）", dh)
@@ -385,7 +408,11 @@ class MainWindow(QMainWindow):
         mf = QSpinBox()
         mf.setRange(1, 30)
         mf.setValue(int(s.control.mouse_mode_stable_frames))
-        mf.setToolTip("マウスモードを確定するまでの安定フレーム数です。増やすと誤判定が減ります。")
+        mf.setToolTip(
+            "マウスモードを確定するまでの安定フレーム数です。\n"
+            "- 大きい: 誤判定が減る（動き出しが遅く/カクつきやすい）\n"
+            "- 小さい: 反応が速い（誤判定が増えやすい）"
+        )
         mf.valueChanged.connect(lambda v: self._set_value("control.mouse_mode_stable_frames", int(v)))
         layout.addRow("モード確定フレーム数", mf)
 
@@ -393,7 +420,11 @@ class MainWindow(QMainWindow):
         dz.setRange(0.0, 0.05)
         dz.setSingleStep(0.001)
         dz.setValue(float(s.control.relative_move_deadzone))
-        dz.setToolTip("小さな手ブレを無視する死域です。大きいほど静止時の揺れが減ります。")
+        dz.setToolTip(
+            "相対移動のデッドゾーン（小さな揺れを無視する幅）です。\n"
+            "- 大きい: 静止時の揺れが減る（小さな移動が反映されにくい）\n"
+            "- 小さい: 微小操作が効く（手ブレが反映されやすい）"
+        )
         dz.valueChanged.connect(lambda v: self._set_value("control.relative_move_deadzone", float(v)))
         layout.addRow("死域（ブレ無視）", dz)
 
@@ -401,19 +432,32 @@ class MainWindow(QMainWindow):
         cl.setRange(0.001, 0.2)
         cl.setSingleStep(0.005)
         cl.setValue(float(s.control.relative_move_clamp_th))
-        cl.setToolTip("異常なジャンプを抑制する上限値です。検出が飛ぶ場合は小さめにします。")
+        cl.setToolTip(
+            "1フレームあたりの最大移動Δ（ジャンプ抑制）です。\n"
+            "- 大きい: 速く動く/引っかかりが減る（検出が飛ぶと大ジャンプしやすい）\n"
+            "- 小さい: ジャンプに強い（動きが段付き/カクつきやすい）\n"
+            "カクカクする場合は 0.15→0.25 のように上げると改善することがあります。"
+        )
         cl.valueChanged.connect(lambda v: self._set_value("control.relative_move_clamp_th", float(v)))
         layout.addRow("ジャンプ抑制しきい値", cl)
 
         cb = QCheckBox()
         cb.setChecked(bool(s.control.click_requires_middle_bent))
-        cb.setToolTip("ONにすると「中指を曲げた状態」をクリック条件に追加し、誤操作を減らします。")
+        cb.setToolTip(
+            "ONにすると「中指を曲げた状態」をクリック条件に追加します。\n"
+            "- ON: 誤クリックが減る（クリック姿勢が必要）\n"
+            "- OFF: クリックが通りやすい（誤クリックが増えやすい）"
+        )
         cb.stateChanged.connect(lambda st: self._set_value("control.click_requires_middle_bent", bool(st)))
         layout.addRow("クリック時に中指を曲げる", cb)
 
         ms = QCheckBox()
         ms.setChecked(bool(s.control.move_suppress_on_middle_bent))
-        ms.setToolTip("中指が曲がり始めたらカーソル移動を抑制し、クリック時のズレを減らします。")
+        ms.setToolTip(
+            "中指が曲がり始めたらカーソル移動を抑制します。\n"
+            "- ON: クリック時のズレが減る（操作が重く感じることがある）\n"
+            "- OFF: 追従が軽い（クリック時にズレやすい）"
+        )
         ms.stateChanged.connect(lambda st: self._set_value("control.move_suppress_on_middle_bent", bool(st)))
         layout.addRow("中指曲げで移動抑制", ms)
 
@@ -426,7 +470,11 @@ class MainWindow(QMainWindow):
 
         en = QCheckBox()
         en.setChecked(bool(s.control.cursor_anchoring.enabled))
-        en.setToolTip("クリックの予兆〜接触中にカーソルを固定して、クリック精度を優先します。")
+        en.setToolTip(
+            "クリックの予兆〜接触中にカーソルを固定し、クリック精度を優先します。\n"
+            "- ON: 小さいUIが押しやすい（固定感が出る）\n"
+            "- OFF: 操作が軽い（クリック時に逃げやすい）"
+        )
         en.stateChanged.connect(lambda st: self._set_value("control.cursor_anchoring.enabled", bool(st)))
         layout.addRow("有効化", en)
 
@@ -441,7 +489,11 @@ class MainWindow(QMainWindow):
         ff = QSpinBox()
         ff.setRange(0, 30)
         ff.setValue(int(s.control.cursor_anchoring.freeze_frames))
-        ff.setToolTip("接触中＋直後に固定するフレーム数です。増やすとズレは減りますが操作が重くなります。")
+        ff.setToolTip(
+            "固定するフレーム数です。\n"
+            "- 大きい: ズレが減る（固定が長く重い）\n"
+            "- 小さい: 軽い（クリック時のズレが出やすい）"
+        )
         ff.valueChanged.connect(lambda v: self._set_value("control.cursor_anchoring.freeze_frames", int(v)))
         layout.addRow("固定フレーム数", ff)
 
@@ -463,7 +515,11 @@ class MainWindow(QMainWindow):
         ss = QSpinBox()
         ss.setRange(1, 5000)
         ss.setValue(int(s.control.scroll_sensitivity))
-        ss.setToolTip("スクロール速度（移動量の倍率）です。大きいほど速くスクロールします。")
+        ss.setToolTip(
+            "スクロール速度（移動量の倍率）です。\n"
+            "- 大きい: 速い（少し動かすだけで大きくスクロール）\n"
+            "- 小さい: 細かい（長い距離のスクロールは遅い）"
+        )
         ss.valueChanged.connect(lambda v: self._set_value("control.scroll_sensitivity", int(v)))
         layout.addRow("スクロール感度", ss)
 
@@ -471,7 +527,11 @@ class MainWindow(QMainWindow):
         sd.setRange(0.0, 0.05)
         sd.setSingleStep(0.001)
         sd.setValue(float(s.control.scroll_deadzone))
-        sd.setToolTip("スクロール開始の死域です。小さな上下ブレによる勝手スクロールを防ぎます。")
+        sd.setToolTip(
+            "スクロール開始のデッドゾーンです。\n"
+            "- 大きい: 勝手スクロールが減る（意図したスクロール開始が難しい）\n"
+            "- 小さい: すぐ反応（勝手スクロールが起きやすい）"
+        )
         sd.valueChanged.connect(lambda v: self._set_value("control.scroll_deadzone", float(v)))
         layout.addRow("スクロール死域", sd)
 
@@ -557,6 +617,9 @@ class MainWindow(QMainWindow):
         th_lay.addWidget(th)
         root.addWidget(th_row)
 
+        # Preset 2（Media）のスロット配置（固定アクションの並べ替え）
+        root.addWidget(self._group_pie_preset2_layout())
+
         container = QWidget()
         lay = QVBoxLayout(container)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -573,6 +636,40 @@ class MainWindow(QMainWindow):
         scroll.setWidget(container)
         root.addWidget(scroll, 1)
         return w
+
+    def _group_pie_preset2_layout(self) -> QGroupBox:
+        g = QGroupBox("Preset 2 (Media) 配置")
+        form = QFormLayout(g)
+        s = self._store.get()
+        layout_ids = list(getattr(s.pie_menu, "preset2_layout"))
+
+        # 選択肢
+        items = [(a.label, a.id) for a in MEDIA_ACTIONS]
+
+        for i in range(1, 9):
+            cb = QComboBox()
+            for label, aid in items:
+                cb.addItem(label, aid)
+            cur = str(layout_ids[i - 1]) if i - 1 < len(layout_ids) else items[i - 1][1]
+            idx = cb.findData(cur)
+            cb.setCurrentIndex(idx if idx >= 0 else 0)
+
+            def _on_changed(_, *, slot_idx=i, combo=cb) -> None:
+                # 現在の配列を読んで、該当位置だけ差し替えて保存する
+                try:
+                    cur_s = self._store.get()
+                    ids = list(getattr(cur_s.pie_menu, "preset2_layout"))
+                    if len(ids) != 8:
+                        return
+                    ids[slot_idx - 1] = str(combo.currentData())
+                    self._set_value("pie_menu.preset2_layout", ids)
+                except Exception:
+                    pass
+
+            cb.currentIndexChanged.connect(_on_changed)
+            form.addRow(f"Slot {i}", cb)
+
+        return g
 
     def _group_pie_preset(self, title: str, *, preset_key: str) -> QGroupBox:
         g = QGroupBox(title)
