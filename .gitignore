@@ -3,9 +3,10 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+config/settings.yaml
+
 # C extensions
 *.so
-settings.yaml
 # Distribution / packaging
 .Python
 build/
