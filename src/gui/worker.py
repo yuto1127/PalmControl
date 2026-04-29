@@ -224,7 +224,9 @@ class VisionControlWorker(QThread):
                     self._pie_open_streak = 0
 
                 open_need = 2  # 連続2フレームで「開く」を確定
-                close_need = 25  # 連続25フレームで「閉じる」を確定（両手操作中の瞬断を吸収）
+                # 閉じる遅延が長すぎると「手をどかしてもしばらく残る」体感になるため短めにする。
+                # 目標: チラつきは抑えつつ、手を外したらすぐ消える。
+                close_need = 6  # 連続6フレームで「閉じる」を確定
 
                 if not control_enabled:
                     pie_should_active = False
