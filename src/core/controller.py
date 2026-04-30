@@ -362,9 +362,15 @@ class MouseController:
         try:
             lm = hand_landmarks
             src = str(getattr(settings.control, "pointer_source", "index_middle_avg"))
-            if src == "index_tip":
+            if src == "wrist":
+                x = float(lm[0].x)
+                y = float(lm[0].y)
+            elif src == "index_tip":
                 x = float(lm[8].x)
                 y = float(lm[8].y)
+            elif src == "index_middle_avg":
+                x = (float(lm[8].x) + float(lm[12].x)) / 2.0
+                y = (float(lm[8].y) + float(lm[12].y)) / 2.0
             else:
                 # 互換: 未知値は従来挙動（平均）
                 x = (float(lm[8].x) + float(lm[12].x)) / 2.0

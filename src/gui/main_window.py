@@ -290,10 +290,14 @@ class MainWindow(QMainWindow):
         ps = QComboBox()
         ps.addItem("人差し指先（ブレ抑制）", "index_tip")
         ps.addItem("人差し指+中指の平均（従来）", "index_middle_avg")
+        ps.addItem("手首（手の付け根・クリック時のブレ抑制）", "wrist")
         current_ps = getattr(s.control, "pointer_source", "index_middle_avg")
         idx = ps.findData(str(current_ps))
         ps.setCurrentIndex(idx if idx >= 0 else 1)
-        ps.setToolTip("カーソル位置の算出元です。クリック姿勢（中指の曲げ伸ばし）でブレる場合は「人差し指先」を推奨します。")
+        ps.setToolTip(
+            "カーソル移動の算出元です（クリック判定・ジェスチャは変更しません）。\n"
+            "親指を寄せるクリック動作で指先が大きく動く場合は「手首」が安定しやすいです。"
+        )
         ps.currentIndexChanged.connect(lambda _: self._set_value("control.pointer_source", str(ps.currentData())))
         layout.addRow("カーソル基準点", ps)
 

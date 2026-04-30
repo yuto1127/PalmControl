@@ -79,6 +79,25 @@ def _draw_landmarks_bgr(frame_bgr, hand_landmarks) -> None:
             cv2.line(frame_bgr, pts[a], pts[b], (0, 200, 255), 2)
 
 
+def _draw_wrist_tracking_marker_bgr(frame_bgr, hand_landmarks) -> None:
+    """マウスカーソル追従に使う手の手首（付け根・ランドマーク0）を強調する。
+
+    通常のランドマーク点と区別しやすいよう、やや大きなマゼンタの印を重ねる。
+    """
+
+    if hand_landmarks is None:
+        return
+    try:
+        lm0 = hand_landmarks[0]
+    except (IndexError, TypeError):
+        return
+    h, w = frame_bgr.shape[:2]
+    x_px = int(float(lm0.x) * w)
+    y_px = int(float(lm0.y) * h)
+    cv2.circle(frame_bgr, (x_px, y_px), 8, (255, 0, 255), 2, lineType=cv2.LINE_AA)
+    cv2.circle(frame_bgr, (x_px, y_px), 3, (255, 0, 255), -1, lineType=cv2.LINE_AA)
+
+
 class VisionControlWorker(QThread):
     """カメラ→検出→（任意で制御）を回すバックグラウンドスレッド。
 
@@ -347,6 +366,8 @@ class VisionControlWorker(QThread):
                         _draw_landmarks_bgr(view, dual.left.hand_landmarks)
                     if dual.right is not None:
                         _draw_landmarks_bgr(view, dual.right.hand_landmarks)
+                    if pointer_det is not None and getattr(pointer_det, "hand_landmarks", None) is not None:
+                        _draw_wrist_tracking_marker_bgr(view, pointer_det.hand_landmarks)
                     # 簡易オーバーレイ
                     anch = settings.control.cursor_anchoring
                     pre_contact = False

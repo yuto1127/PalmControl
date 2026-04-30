@@ -69,8 +69,8 @@ class HandDetector:
     実装ポイント（spec準拠）:
     - MediaPipe Tasksの HandLandmarker をVIDEOモードで使用（追跡によりリアルタイム性を確保）
     - 設定は `config/settings.yaml` を参照（confidence, frame_skip, click_threshold, ROI）
-    - 指本数優先でモードを排他的に決める（5本=Scroll, 2本=Mouse）
-    - Mouseモードでは、(index_tip, middle_tip) の中点を正規化座標で返す
+    - 指本数優先でモードを排他的に決める（4本拡張=Scroll, 人差し指系=Mouse）
+    - Mouseモードでは pointer_source に応じた点を正規化座標で返す
     - 親指と人差し指の距離でコンタクト判定を返す
     - 処理時間を測定し、ロガーがあれば出力できるようにする
     """
@@ -327,17 +327,24 @@ class HandDetector:
     def _is_mouse_mode(finger_states: dict) -> bool:
         """Mouseモード（カーソル操作）の判定。
 
-        初期仕様では「人差し指＋中指が伸展、薬指＋小指は屈曲」を厳密に要求していたが、
-        実運用ではリング/ピンキーの伸展判定が揺れやすく、Mouseモードに入りにくい。
+        従来は「人差し指＋中指の両方伸展」が必要だったが、中指を曲げるクリック予備姿勢で
+        middle が伸展判定にならず mode が None に落ちる。このとき pointer_xy が計算されず
+        カーソル追従が途切れるため、手首基準（pointer_source=wrist）も効果が出ない。
 
-        Scrollは別で優先判定されているため、ここでは操作性を優先して
-        - 人差し指＋中指が伸展している
-        をMouse条件とする。
+        方針（Scroll は呼び出し側で先に判定される）:
+        - 人差し指が伸展している
+        - 薬指・小指は伸展していない（4本立ち＝Scroll に進む前の段階を Mouse に含めない）
+        - 中指の曲げ伸ばしは必須にしない（クリック姿勢でも pointer_xy を維持）
         """
 
         index_ext = bool(finger_states.get("index", False))
-        middle_ext = bool(finger_states.get("middle", False))
-        return index_ext and middle_ext
+        ring_ext = bool(finger_states.get("ring", False))
+        pinky_ext = bool(finger_states.get("pinky", False))
+        if not index_ext:
+            return False
+        if ring_ext or pinky_ext:
+            return False
+        return True
 
     @staticmethod
     def _is_scroll_mode(finger_states: dict) -> bool:
@@ -473,15 +480,23 @@ class HandDetector:
         - control.pointer_source に応じて算出点を切り替える
           - index_tip: 人差し指先(8)
           - index_middle_avg: 人差し指先(8)と中指先(12)の平均
+          - wrist: 手首(0)。クリック姿勢で指先が動いてもカーソル移動のブレを抑えやすい
+        - 接触（クリック）判定は pointer_source に依存せず、従来どおり指先距離で行う
         - ROIが有効ならROI内で正規化し直し、少ない手の動きで全画面操作しやすくする
         - 返り値のXは「ユーザー視点で直感的」になるよう鏡補正（mirror_x=Trueなら反転）
         """
 
         lm = hand_landmarks
         src = str(getattr(settings.control, "pointer_source", "index_middle_avg"))
-        if src == "index_tip":
+        if src == "wrist":
+            x = float(lm[0].x)
+            y = float(lm[0].y)
+        elif src == "index_tip":
             x = float(lm[8].x)
             y = float(lm[8].y)
+        elif src == "index_middle_avg":
+            x = (float(lm[8].x) + float(lm[12].x)) / 2.0
+            y = (float(lm[8].y) + float(lm[12].y)) / 2.0
         else:
             # 互換: 未知値は従来挙動（平均）
             x = (float(lm[8].x) + float(lm[12].x)) / 2.0
