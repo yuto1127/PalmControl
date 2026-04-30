@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import QApplication
 from src.core.command_executor import CommandExecutor, CommandSpec
 from src.core.media_preset import media_actions_by_id
 from src.gui.main_window import MainWindow
+from src.gui.modern_style import apply_modern_theme
 from src.gui.pie_menu import PieMenuOverlay
 from src.gui.tray_icon import TrayIcon
 from src.gui.worker import VisionControlWorker
@@ -28,6 +29,7 @@ def main() -> int:
             pass
 
     app = QApplication(sys.argv)
+    apply_modern_theme(app)
 
     store = ConfigStore()
     worker = VisionControlWorker(store)

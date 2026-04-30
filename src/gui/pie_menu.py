@@ -3,12 +3,13 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import pyautogui
-from PyQt6.QtCore import Qt, QTimer, QRectF, pyqtSignal
-from PyQt6.QtGui import QColor, QCursor, QFont, QGuiApplication, QPainter, QPen
-from PyQt6.QtWidgets import QApplication, QWidget
+from PyQt6.QtCore import Qt, QTimer, QRectF, QSize, pyqtSignal
+from PyQt6.QtGui import QColor, QCursor, QFont, QGuiApplication, QPainter, QPen, QPixmap
+from PyQt6.QtWidgets import QApplication, QFileIconProvider, QWidget
+from PyQt6.QtCore import QFileInfo
 
 from src.utils.config_loader import ConfigStore, PieMenuSlot
 from src.utils.macos_overlay import apply_fullscreen_auxiliary_collection_behavior
@@ -53,8 +54,39 @@ class PieMenuOverlay(QWidget):
         self._action_msg_until_ms: int = 0
         self._last_click_until_ms: int = 0
 
+        # applicationスロットのアイコンを描画するためのキャッシュ
+        self._icon_provider = QFileIconProvider()
+        self._icon_cache: Dict[str, QPixmap] = {}
+
         self._init_window()
         self._apply_inert_state()
+
+    def _icon_pixmap_for_slot(self, slot_cfg: PieMenuSlot, *, size: int) -> Optional[QPixmap]:
+        """slot_cfg が application のとき、OSのファイルアイコンPixmapを返す。"""
+
+        try:
+            if str(slot_cfg.type).strip().lower() != "application":
+                return None
+            path = str(slot_cfg.value or "").strip()
+            if not path:
+                return None
+            if path in self._icon_cache:
+                return self._icon_cache[path]
+
+            fi = QFileInfo(path)
+            if not fi.exists():
+                return None
+
+            icon = self._icon_provider.icon(fi)
+            if icon.isNull():
+                return None
+            pm = icon.pixmap(QSize(int(size), int(size)))
+            if pm.isNull():
+                return None
+            self._icon_cache[path] = pm
+            return pm
+        except Exception:
+            return None
 
     def _init_window(self) -> None:
         self.setWindowTitle("PieMenu")
@@ -353,7 +385,17 @@ class PieMenuOverlay(QWidget):
             f.setPointSize(10 if not is_sel else 11)
             f.setBold(bool(is_sel))
             painter.setFont(f)
-            painter.drawText(int(tx - 48), int(ty - 12), 96, 24, int(Qt.AlignmentFlag.AlignCenter), text)
+
+            # applicationスロットはアイコンを併記して識別しやすくする
+            # 小さすぎると識別しにくいので、やや大きめに描く
+            icon_size = 38 if is_sel else 34
+            pm = self._icon_pixmap_for_slot(slot_cfg, size=icon_size)
+            if pm is not None and (not pm.isNull()):
+                # アイコンを上、ラベルを下に配置して読みやすくする
+                painter.drawPixmap(int(tx - (icon_size // 2)), int(ty - 40), pm)
+                painter.drawText(int(tx - 72), int(ty + 2), 144, 28, int(Qt.AlignmentFlag.AlignCenter), text)
+            else:
+                painter.drawText(int(tx - 48), int(ty - 12), 96, 24, int(Qt.AlignmentFlag.AlignCenter), text)
 
         # セクタ境界線（中心から外周へ）
         # 境界を 22.5° ずらし、中心が上下左右/斜めに揃うようにする

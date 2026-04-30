@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QLocale, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QImage, QPainter, QPixmap
 from PyQt6.QtWidgets import (
+    QAbstractSpinBox,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -31,6 +32,10 @@ from PyQt6.QtWidgets import (
 from src.gui.worker import VisionControlWorker
 from src.utils.config_loader import ConfigStore
 from src.core.media_preset import MEDIA_ACTIONS
+
+# (YAML dotted path, ウィジェット, カメラ再初期化が必要か)
+SettingsBinding = Tuple[str, QWidget, bool]
+PieBinding = Tuple[str, QWidget]
 
 
 class _AspectFitPixmapLabel(QWidget):
@@ -82,10 +87,21 @@ class MainWindow(QMainWindow):
         self._worker = worker
         self._motion_last_qimage: Optional[QImage] = None
 
+        self._settings_bindings: List[SettingsBinding] = []
+        self._settings_edit_mode = False
+        self._pie_bindings: List[PieBinding] = []
+        self._pie_preset2_combos: List[QComboBox] = []
+        self._pie_extra_buttons: List[QPushButton] = []
+        self._pie_edit_mode = False
+        self._prev_tab_index = 0
+        self._log_dir_label: Optional[QLabel] = None
+        self._log_file_label: Optional[QLabel] = None
+
         self.setWindowTitle("PalmControl")
         self.resize(980, 720)
 
         self._tabs = QTabWidget()
+        self._tabs.setDocumentMode(True)
         self.setCentralWidget(self._tabs)
 
         self._settings_tab = self._build_settings_tab()
@@ -114,13 +130,233 @@ class MainWindow(QMainWindow):
 
         self._on_tab_changed(self._tabs.currentIndex())
 
+    def _bind_setting(self, path: str, w: QWidget, *, camera_restart: bool = False) -> None:
+        self._settings_bindings.append((path, w, camera_restart))
+
+    def _bind_pie(self, path: str, w: QWidget) -> None:
+        self._pie_bindings.append((path, w))
+
+    def _get_raw_setting_value(self, dotted_path: str) -> Any:
+        parts = dotted_path.split(".")
+        cur: Any = self._store.as_dict()
+        for p in parts:
+            if not isinstance(cur, dict):
+                raise KeyError(dotted_path)
+            nk: Any = None
+            if p in cur:
+                nk = p
+            elif p.isdigit():
+                for cand in (int(p), str(int(p))):
+                    if cand in cur:
+                        nk = cand
+                        break
+            if nk is None:
+                raise KeyError(dotted_path)
+            cur = cur[nk]
+        return cur
+
+    def _set_widget_from_value(self, w: QWidget, val: Any) -> None:
+        w.blockSignals(True)
+        try:
+            if isinstance(w, QSpinBox):
+                w.setValue(int(val))
+            elif isinstance(w, QDoubleSpinBox):
+                w.setValue(float(val))
+            elif isinstance(w, QComboBox):
+                idx = w.findData(str(val))
+                if idx >= 0:
+                    w.setCurrentIndex(idx)
+            elif isinstance(w, QCheckBox):
+                w.setChecked(bool(val))
+            elif isinstance(w, QLineEdit):
+                w.setText(str(val))
+        finally:
+            w.blockSignals(False)
+
+    @staticmethod
+    def _tune_double_spin(w: QDoubleSpinBox) -> None:
+        """小数入力をしやすくする共通設定。
+
+        QDoubleSpinBox は入力途中の状態で補正が走ると「桁を消して打ち直す」操作がしづらい。
+        - keyboardTracking=False: Enter/フォーカスアウトまで値を確定しない
+        - correction: 不正状態は確定時に前値へ戻す（入力中は邪魔しない）
+        """
+
+        try:
+            # 小数点は常に '.' を許可（環境ロケール依存で ',' になって入力が弾かれるのを防ぐ）
+            w.setLocale(QLocale.c())
+            try:
+                w.setGroupSeparatorShown(False)
+            except Exception:
+                pass
+            w.setKeyboardTracking(False)
+            w.setCorrectionMode(QAbstractSpinBox.CorrectionMode.CorrectToPreviousValue)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _get_widget_value(w: QWidget) -> Any:
+        if isinstance(w, QSpinBox):
+            return int(w.value())
+        if isinstance(w, QDoubleSpinBox):
+            return float(w.value())
+        if isinstance(w, QComboBox):
+            return str(w.currentData())
+        if isinstance(w, QCheckBox):
+            return bool(w.isChecked())
+        if isinstance(w, QLineEdit):
+            return str(w.text())
+        raise TypeError(type(w))
+
+    def _reload_settings_widgets_from_store(self) -> None:
+        for path, w, _ in self._settings_bindings:
+            try:
+                val = self._get_raw_setting_value(path)
+                self._set_widget_from_value(w, val)
+            except Exception:
+                pass
+        try:
+            s = self._store.get()
+            if self._log_dir_label is not None:
+                self._log_dir_label.setText(str(s.logging.log_dir))
+            if self._log_file_label is not None:
+                self._log_file_label.setText(str(s.logging.log_file_name))
+        except Exception:
+            pass
+
+    def _commit_settings_from_widgets(self) -> None:
+        need_restart = False
+        for path, w, cam_r in self._settings_bindings:
+            try:
+                val = self._get_widget_value(w)
+                self._set_value(path, val)
+                if cam_r:
+                    need_restart = True
+            except Exception:
+                pass
+        if need_restart:
+            self.requestRestartCamera.emit()
+
+    def _set_settings_fields_enabled(self, enabled: bool) -> None:
+        for _, w, __ in self._settings_bindings:
+            w.setEnabled(enabled)
+
+    def _on_settings_edit_clicked(self) -> None:
+        self._settings_edit_mode = True
+        self._set_settings_fields_enabled(True)
+        self._btn_settings_edit.setVisible(False)
+        self._btn_settings_apply.setVisible(True)
+        self._btn_settings_cancel.setVisible(True)
+
+    def _on_settings_apply_clicked(self) -> None:
+        self._commit_settings_from_widgets()
+        self._settings_edit_mode = False
+        self._set_settings_fields_enabled(False)
+        self._btn_settings_edit.setVisible(True)
+        self._btn_settings_apply.setVisible(False)
+        self._btn_settings_cancel.setVisible(False)
+
+    def _on_settings_cancel_clicked(self) -> None:
+        self._reload_settings_widgets_from_store()
+        self._settings_edit_mode = False
+        self._set_settings_fields_enabled(False)
+        self._btn_settings_edit.setVisible(True)
+        self._btn_settings_apply.setVisible(False)
+        self._btn_settings_cancel.setVisible(False)
+
+    def _reload_pie_widgets_from_store(self) -> None:
+        s = self._store.get()
+        for i, cb in enumerate(self._pie_preset2_combos):
+            if i < len(s.pie_menu.preset2_layout):
+                cur = str(s.pie_menu.preset2_layout[i])
+                idx = cb.findData(cur)
+                cb.blockSignals(True)
+                try:
+                    cb.setCurrentIndex(idx if idx >= 0 else 0)
+                finally:
+                    cb.blockSignals(False)
+        for path, w in self._pie_bindings:
+            try:
+                val = self._get_raw_setting_value(path)
+                self._set_widget_from_value(w, val)
+            except Exception:
+                pass
+
+    def _commit_pie_from_widgets(self) -> None:
+        try:
+            ids = [str(cb.currentData()) for cb in self._pie_preset2_combos]
+            self._set_value("pie_menu.preset2_layout", ids)
+        except Exception:
+            pass
+        for path, w in self._pie_bindings:
+            try:
+                self._set_value(path, self._get_widget_value(w))
+            except Exception:
+                pass
+
+    def _set_pie_fields_enabled(self, enabled: bool) -> None:
+        for _, w in self._pie_bindings:
+            w.setEnabled(enabled)
+        for cb in self._pie_preset2_combos:
+            cb.setEnabled(enabled)
+        for b in self._pie_extra_buttons:
+            b.setEnabled(enabled)
+
+    def _on_pie_edit_clicked(self) -> None:
+        self._pie_edit_mode = True
+        self._set_pie_fields_enabled(True)
+        self._btn_pie_edit.setVisible(False)
+        self._btn_pie_apply.setVisible(True)
+        self._btn_pie_cancel.setVisible(True)
+
+    def _on_pie_apply_clicked(self) -> None:
+        self._commit_pie_from_widgets()
+        self._pie_edit_mode = False
+        self._set_pie_fields_enabled(False)
+        self._btn_pie_edit.setVisible(True)
+        self._btn_pie_apply.setVisible(False)
+        self._btn_pie_cancel.setVisible(False)
+
+    def _on_pie_cancel_clicked(self) -> None:
+        self._reload_pie_widgets_from_store()
+        self._pie_edit_mode = False
+        self._set_pie_fields_enabled(False)
+        self._btn_pie_edit.setVisible(True)
+        self._btn_pie_apply.setVisible(False)
+        self._btn_pie_cancel.setVisible(False)
+
     # -----------------------------
     # Settings tab
     # -----------------------------
     def _build_settings_tab(self) -> QWidget:
+        self._settings_bindings.clear()
+
         w = QWidget()
         root = QVBoxLayout(w)
-        root.setContentsMargins(0, 0, 0, 0)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
+
+        edit_row = QHBoxLayout()
+        self._btn_settings_edit = QPushButton("設定を編集")
+        self._btn_settings_apply = QPushButton("変更を適用")
+        self._btn_settings_cancel = QPushButton("キャンセル")
+        self._btn_settings_apply.setVisible(False)
+        self._btn_settings_cancel.setVisible(False)
+        self._btn_settings_edit.clicked.connect(self._on_settings_edit_clicked)
+        self._btn_settings_apply.clicked.connect(self._on_settings_apply_clicked)
+        self._btn_settings_cancel.clicked.connect(self._on_settings_cancel_clicked)
+        edit_row.addWidget(self._btn_settings_edit)
+        edit_row.addWidget(self._btn_settings_apply)
+        edit_row.addWidget(self._btn_settings_cancel)
+        edit_row.addStretch(1)
+        root.addLayout(edit_row)
+
+        hint = QLabel(
+            "スクロールによる誤変更を防ぐため、スピン等は閲覧のみです。"
+            "「設定を編集」から編集し、「変更を適用」で保存してください。"
+        )
+        hint.setWordWrap(True)
+        root.addWidget(hint)
 
         btn_row = QHBoxLayout()
         reload_btn = QPushButton("YAML再読込")
@@ -160,6 +396,9 @@ class MainWindow(QMainWindow):
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setWidget(form_container)
         root.addWidget(scroll, 1)
+
+        self._reload_settings_widgets_from_store()
+        self._set_settings_fields_enabled(False)
         return w
 
     def _reload_yaml(self) -> None:
@@ -167,6 +406,10 @@ class MainWindow(QMainWindow):
             self._store.reload_from_disk()
         except Exception:
             pass
+        if not self._settings_edit_mode:
+            self._reload_settings_widgets_from_store()
+        if not self._pie_edit_mode:
+            self._reload_pie_widgets_from_store()
 
     def _group_camera(self) -> QGroupBox:
         g = QGroupBox("カメラ設定")
@@ -177,34 +420,34 @@ class MainWindow(QMainWindow):
         device.setRange(0, 16)
         device.setValue(int(s.camera.device_id))
         device.setToolTip("使用するカメラデバイスIDです。一般的に内蔵カメラは 0 です。")
-        device.valueChanged.connect(lambda v: self._set_and_restart("camera.device_id", int(v)))
+        self._bind_setting("camera.device_id", device, camera_restart=True)
         layout.addRow("カメラID", device)
 
         width = QSpinBox()
         width.setRange(160, 1920)
         width.setValue(int(s.camera.width))
         width.setToolTip("プレビュー/解析に使う横解像度（幅）です。下げると軽くなります。")
-        width.valueChanged.connect(lambda v: self._set_and_restart("camera.width", int(v)))
+        self._bind_setting("camera.width", width, camera_restart=True)
         layout.addRow("解像度（幅）", width)
 
         height = QSpinBox()
         height.setRange(120, 1080)
         height.setValue(int(s.camera.height))
         height.setToolTip("プレビュー/解析に使う縦解像度（高さ）です。下げると軽くなります。")
-        height.valueChanged.connect(lambda v: self._set_and_restart("camera.height", int(v)))
+        self._bind_setting("camera.height", height, camera_restart=True)
         layout.addRow("解像度（高さ）", height)
 
         fps = QSpinBox()
         fps.setRange(5, 120)
         fps.setValue(int(s.camera.fps))
         fps.setToolTip("カメラの目標FPSです。高すぎると負荷が増えます。")
-        fps.valueChanged.connect(lambda v: self._set_and_restart("camera.fps", int(v)))
+        self._bind_setting("camera.fps", fps, camera_restart=True)
         layout.addRow("FPS", fps)
 
         roi_enabled = QCheckBox("enabled")
         roi_enabled.setChecked(bool(s.camera.roi.enabled))
         roi_enabled.setToolTip("有効にすると解析範囲（ROI）を使って処理負荷を下げます。")
-        roi_enabled.stateChanged.connect(lambda st: self._set_value("camera.roi.enabled", bool(st)))
+        self._bind_setting("camera.roi.enabled", roi_enabled)
         layout.addRow("ROI（解析範囲）", roi_enabled)
 
         return g
@@ -218,36 +461,40 @@ class MainWindow(QMainWindow):
         rx.setRange(0.0, 1.0)
         rx.setSingleStep(0.01)
         rx.setDecimals(3)
+        self._tune_double_spin(rx)
         rx.setValue(float(s.camera.roi.x))
         rx.setToolTip("ROIの左上X（正規化 0.0〜1.0）。")
-        rx.valueChanged.connect(lambda v: self._set_value("camera.roi.x", float(v)))
+        self._bind_setting("camera.roi.x", rx)
         layout.addRow("ROI X（左）", rx)
 
         ry = QDoubleSpinBox()
         ry.setRange(0.0, 1.0)
         ry.setSingleStep(0.01)
         ry.setDecimals(3)
+        self._tune_double_spin(ry)
         ry.setValue(float(s.camera.roi.y))
         ry.setToolTip("ROIの左上Y（正規化 0.0〜1.0）。")
-        ry.valueChanged.connect(lambda v: self._set_value("camera.roi.y", float(v)))
+        self._bind_setting("camera.roi.y", ry)
         layout.addRow("ROI Y（上）", ry)
 
         rw = QDoubleSpinBox()
         rw.setRange(0.0, 1.0)
         rw.setSingleStep(0.01)
         rw.setDecimals(3)
+        self._tune_double_spin(rw)
         rw.setValue(float(s.camera.roi.w))
         rw.setToolTip("ROIの幅（正規化 0.0〜1.0）。x+wが1.0を超えないようにしてください。")
-        rw.valueChanged.connect(lambda v: self._set_value("camera.roi.w", float(v)))
+        self._bind_setting("camera.roi.w", rw)
         layout.addRow("ROI 幅", rw)
 
         rh = QDoubleSpinBox()
         rh.setRange(0.0, 1.0)
         rh.setSingleStep(0.01)
         rh.setDecimals(3)
+        self._tune_double_spin(rh)
         rh.setValue(float(s.camera.roi.h))
         rh.setToolTip("ROIの高さ（正規化 0.0〜1.0）。y+hが1.0を超えないようにしてください。")
-        rh.valueChanged.connect(lambda v: self._set_value("camera.roi.h", float(v)))
+        self._bind_setting("camera.roi.h", rh)
         layout.addRow("ROI 高さ", rh)
 
         return g
@@ -260,24 +507,28 @@ class MainWindow(QMainWindow):
         det = QDoubleSpinBox()
         det.setRange(0.0, 1.0)
         det.setSingleStep(0.05)
+        det.setDecimals(3)
+        self._tune_double_spin(det)
         det.setValue(float(s.detection.min_detection_confidence))
         det.setToolTip("手の検出のしきい値です。高いほど誤検出は減りますが検出しにくくなります。")
-        det.valueChanged.connect(lambda v: self._set_value("detection.min_detection_confidence", float(v)))
+        self._bind_setting("detection.min_detection_confidence", det)
         layout.addRow("検出信頼度（初回）", det)
 
         tr = QDoubleSpinBox()
         tr.setRange(0.0, 1.0)
         tr.setSingleStep(0.05)
+        tr.setDecimals(3)
+        self._tune_double_spin(tr)
         tr.setValue(float(s.detection.min_tracking_confidence))
         tr.setToolTip("追跡（フレーム間）のしきい値です。高いほど安定しますがロストしやすくなります。")
-        tr.valueChanged.connect(lambda v: self._set_value("detection.min_tracking_confidence", float(v)))
+        self._bind_setting("detection.min_tracking_confidence", tr)
         layout.addRow("追跡信頼度", tr)
 
         fs = QSpinBox()
         fs.setRange(0, 10)
         fs.setValue(int(s.detection.frame_skip))
         fs.setToolTip("解析を間引くフレーム数です。0で毎フレーム解析（重い）。増やすと軽くなります。")
-        fs.valueChanged.connect(lambda v: self._set_value("detection.frame_skip", int(v)))
+        self._bind_setting("detection.frame_skip", fs)
         layout.addRow("フレーム間引き", fs)
 
         return g
@@ -298,45 +549,53 @@ class MainWindow(QMainWindow):
             "カーソル移動の算出元です（クリック判定・ジェスチャは変更しません）。\n"
             "親指を寄せるクリック動作で指先が大きく動く場合は「手首」が安定しやすいです。"
         )
-        ps.currentIndexChanged.connect(lambda _: self._set_value("control.pointer_source", str(ps.currentData())))
+        self._bind_setting("control.pointer_source", ps)
         layout.addRow("カーソル基準点", ps)
 
         # 基本感度（軸別未指定のときの共通値）。軸別を直接いじる運用が多いが、yaml互換のため残す。
         s_all = QDoubleSpinBox()
         s_all.setRange(0.1, 6.0)
         s_all.setSingleStep(0.1)
+        s_all.setDecimals(3)
+        self._tune_double_spin(s_all)
         s_all.setValue(float(s.control.sensitivity))
         s_all.setToolTip("基本のマウス感度です（互換用）。通常は左右/上下を個別に調整します。")
-        s_all.valueChanged.connect(lambda v: self._set_value("control.sensitivity", float(v)))
+        self._bind_setting("control.sensitivity", s_all)
         layout.addRow("マウス感度（共通）", s_all)
 
         sx = QDoubleSpinBox()
         sx.setRange(0.1, 6.0)
         sx.setSingleStep(0.1)
+        sx.setDecimals(3)
+        self._tune_double_spin(sx)
         sx.setValue(float(s.control.sensitivity_x))
         sx.setToolTip(
             "左右方向のマウス移動感度です。\n"
             "- 大きい: 少ない手移動で大きく動く（速い/暴れやすい）\n"
             "- 小さい: 細かい操作がしやすい（端まで届きにくい）"
         )
-        sx.valueChanged.connect(lambda v: self._set_value("control.sensitivity_x", float(v)))
+        self._bind_setting("control.sensitivity_x", sx)
         layout.addRow("マウス感度（左右）", sx)
 
         sy = QDoubleSpinBox()
         sy.setRange(0.1, 6.0)
         sy.setSingleStep(0.1)
+        sy.setDecimals(3)
+        self._tune_double_spin(sy)
         sy.setValue(float(s.control.sensitivity_y))
         sy.setToolTip(
             "上下方向のマウス移動感度です。\n"
             "- 大きい: 少ない手移動で大きく動く（速い/暴れやすい）\n"
             "- 小さい: 細かい操作がしやすい（端まで届きにくい）"
         )
-        sy.valueChanged.connect(lambda v: self._set_value("control.sensitivity_y", float(v)))
+        self._bind_setting("control.sensitivity_y", sy)
         layout.addRow("マウス感度（上下）", sy)
 
         sf = QDoubleSpinBox()
         sf.setRange(0.01, 1.0)
         sf.setSingleStep(0.05)
+        sf.setDecimals(3)
+        self._tune_double_spin(sf)
         sf.setValue(float(s.control.smoothing_factor))
         sf.setToolTip(
             "平滑化（EMA）係数です。\n"
@@ -344,38 +603,42 @@ class MainWindow(QMainWindow):
             "- 小さい: 滑らか（遅延/もっさりしやすい）\n"
             "カクつく場合は 0.35→0.45 など少し上げると改善することがあります。"
         )
-        sf.valueChanged.connect(lambda v: self._set_value("control.smoothing_factor", float(v)))
+        self._bind_setting("control.smoothing_factor", sf)
         layout.addRow("スムージング係数", sf)
 
         ct = QDoubleSpinBox()
         ct.setRange(0.0, 0.2)
         ct.setSingleStep(0.005)
+        ct.setDecimals(4)
+        self._tune_double_spin(ct)
         ct.setValue(float(s.control.click_threshold))
         ct.setToolTip(
             "接触（pinch）判定の距離しきい値です。\n"
             "- 大きい: 浅いつまみでもON（誤判定も増えやすい）\n"
             "- 小さい: しっかりつままないとON（誤判定は減る）"
         )
-        ct.valueChanged.connect(lambda v: self._set_value("control.click_threshold", float(v)))
+        self._bind_setting("control.click_threshold", ct)
         layout.addRow("クリックしきい値", ct)
 
         pre = QDoubleSpinBox()
         pre.setRange(0.0, 0.3)
         pre.setSingleStep(0.005)
+        pre.setDecimals(4)
+        self._tune_double_spin(pre)
         pre.setValue(float(s.control.cursor_anchoring.pre_contact_threshold))
         pre.setToolTip(
             "アンカリング（クリック時の固定）開始の距離しきい値です。\n"
             "- 大きい: 早い段階で固定（クリックは安定/通常移動が止まりやすい）\n"
             "- 小さい: 固定が遅い（通常移動は軽い/クリック時にズレやすい）"
         )
-        pre.valueChanged.connect(lambda v: self._set_value("control.cursor_anchoring.pre_contact_threshold", float(v)))
+        self._bind_setting("control.cursor_anchoring.pre_contact_threshold", pre)
         layout.addRow("固定開始（予兆）しきい値", pre)
 
         ti = QSpinBox()
         ti.setRange(50, 1200)
         ti.setValue(int(s.control.tap_interval_ms))
         ti.setToolTip("タップの連続判定の時間幅（ms）です。遅めのタップなら大きめにします。")
-        ti.valueChanged.connect(lambda v: self._set_value("control.tap_interval_ms", int(v)))
+        self._bind_setting("control.tap_interval_ms", ti)
         layout.addRow("タップ間隔（ms）", ti)
 
         dh = QSpinBox()
@@ -386,7 +649,7 @@ class MainWindow(QMainWindow):
             "- 大きい: ドラッグ誤発火が減る（ドラッグ開始が遅い）\n"
             "- 小さい: すぐドラッグ開始（クリックしたいのにドラッグになりやすい）"
         )
-        dh.valueChanged.connect(lambda v: self._set_value("control.drag_hold_ms", int(v)))
+        self._bind_setting("control.drag_hold_ms", dh)
         layout.addRow("ドラッグ開始（長押しms）", dh)
 
         dg = QSpinBox()
@@ -396,7 +659,7 @@ class MainWindow(QMainWindow):
             "ドラッグ中に接触判定が一瞬OFFになっても、この時間未満なら押下を維持します。"
             "範囲選択中のmouseUp誤発火を減らします。"
         )
-        dg.valueChanged.connect(lambda v: self._set_value("control.drag_contact_grace_ms", int(v)))
+        self._bind_setting("control.drag_contact_grace_ms", dg)
         layout.addRow("ドラッグ中:接触OFF猶予（ms）", dg)
 
         df = QSpinBox()
@@ -406,7 +669,7 @@ class MainWindow(QMainWindow):
             "ドラッグ中に接触OFFがこのフレーム数連続したら離脱（mouseUp）します。"
             "猶予よりも「本当に離した」判定を優先したい場合に増やします。"
         )
-        df.valueChanged.connect(lambda v: self._set_value("control.drag_contact_release_frames", int(v)))
+        self._bind_setting("control.drag_contact_release_frames", df)
         layout.addRow("ドラッグ中:離脱確定フレーム", df)
 
         mf = QSpinBox()
@@ -417,24 +680,29 @@ class MainWindow(QMainWindow):
             "- 大きい: 誤判定が減る（動き出しが遅く/カクつきやすい）\n"
             "- 小さい: 反応が速い（誤判定が増えやすい）"
         )
-        mf.valueChanged.connect(lambda v: self._set_value("control.mouse_mode_stable_frames", int(v)))
+        self._bind_setting("control.mouse_mode_stable_frames", mf)
         layout.addRow("モード確定フレーム数", mf)
 
         dz = QDoubleSpinBox()
         dz.setRange(0.0, 0.05)
         dz.setSingleStep(0.001)
+        dz.setDecimals(4)
+        self._tune_double_spin(dz)
         dz.setValue(float(s.control.relative_move_deadzone))
         dz.setToolTip(
             "相対移動のデッドゾーン（小さな揺れを無視する幅）です。\n"
             "- 大きい: 静止時の揺れが減る（小さな移動が反映されにくい）\n"
             "- 小さい: 微小操作が効く（手ブレが反映されやすい）"
         )
-        dz.valueChanged.connect(lambda v: self._set_value("control.relative_move_deadzone", float(v)))
+        self._bind_setting("control.relative_move_deadzone", dz)
         layout.addRow("死域（ブレ無視）", dz)
 
         cl = QDoubleSpinBox()
-        cl.setRange(0.001, 0.2)
+        # settings.yaml の既定が 0.25 のため、上限 0.2 だと範囲外になり編集が破綻しやすい
+        cl.setRange(0.001, 0.5)
         cl.setSingleStep(0.005)
+        cl.setDecimals(4)
+        self._tune_double_spin(cl)
         cl.setValue(float(s.control.relative_move_clamp_th))
         cl.setToolTip(
             "1フレームあたりの最大移動Δ（ジャンプ抑制）です。\n"
@@ -442,7 +710,7 @@ class MainWindow(QMainWindow):
             "- 小さい: ジャンプに強い（動きが段付き/カクつきやすい）\n"
             "カクカクする場合は 0.15→0.25 のように上げると改善することがあります。"
         )
-        cl.valueChanged.connect(lambda v: self._set_value("control.relative_move_clamp_th", float(v)))
+        self._bind_setting("control.relative_move_clamp_th", cl)
         layout.addRow("ジャンプ抑制しきい値", cl)
 
         cb = QCheckBox()
@@ -452,7 +720,7 @@ class MainWindow(QMainWindow):
             "- ON: 誤クリックが減る（クリック姿勢が必要）\n"
             "- OFF: クリックが通りやすい（誤クリックが増えやすい）"
         )
-        cb.stateChanged.connect(lambda st: self._set_value("control.click_requires_middle_bent", bool(st)))
+        self._bind_setting("control.click_requires_middle_bent", cb)
         layout.addRow("クリック時に中指を曲げる", cb)
 
         ms = QCheckBox()
@@ -462,7 +730,7 @@ class MainWindow(QMainWindow):
             "- ON: クリック時のズレが減る（操作が重く感じることがある）\n"
             "- OFF: 追従が軽い（クリック時にズレやすい）"
         )
-        ms.stateChanged.connect(lambda st: self._set_value("control.move_suppress_on_middle_bent", bool(st)))
+        self._bind_setting("control.move_suppress_on_middle_bent", ms)
         layout.addRow("中指曲げで移動抑制", ms)
 
         return g
@@ -479,15 +747,17 @@ class MainWindow(QMainWindow):
             "- ON: 小さいUIが押しやすい（固定感が出る）\n"
             "- OFF: 操作が軽い（クリック時に逃げやすい）"
         )
-        en.stateChanged.connect(lambda st: self._set_value("control.cursor_anchoring.enabled", bool(st)))
+        self._bind_setting("control.cursor_anchoring.enabled", en)
         layout.addRow("有効化", en)
 
         pre = QDoubleSpinBox()
         pre.setRange(0.0, 0.3)
         pre.setSingleStep(0.005)
+        pre.setDecimals(4)
+        self._tune_double_spin(pre)
         pre.setValue(float(s.control.cursor_anchoring.pre_contact_threshold))
         pre.setToolTip("接触の手前（予兆）で固定し始める距離です。")
-        pre.valueChanged.connect(lambda v: self._set_value("control.cursor_anchoring.pre_contact_threshold", float(v)))
+        self._bind_setting("control.cursor_anchoring.pre_contact_threshold", pre)
         layout.addRow("固定開始（予兆）しきい値", pre)
 
         ff = QSpinBox()
@@ -498,15 +768,17 @@ class MainWindow(QMainWindow):
             "- 大きい: ズレが減る（固定が長く重い）\n"
             "- 小さい: 軽い（クリック時のズレが出やすい）"
         )
-        ff.valueChanged.connect(lambda v: self._set_value("control.cursor_anchoring.freeze_frames", int(v)))
+        self._bind_setting("control.cursor_anchoring.freeze_frames", ff)
         layout.addRow("固定フレーム数", ff)
 
         ov = QDoubleSpinBox()
         ov.setRange(0.0, 1.0)
         ov.setSingleStep(0.01)
+        ov.setDecimals(4)
+        self._tune_double_spin(ov)
         ov.setValue(float(s.control.cursor_anchoring.override_smoothing_factor_ema))
         ov.setToolTip("固定中のEMA係数です。0に近いほどほぼ固定、1に近いほど追従します。")
-        ov.valueChanged.connect(lambda v: self._set_value("control.cursor_anchoring.override_smoothing_factor_ema", float(v)))
+        self._bind_setting("control.cursor_anchoring.override_smoothing_factor_ema", ov)
         layout.addRow("固定中EMA係数", ov)
 
         return g
@@ -524,19 +796,21 @@ class MainWindow(QMainWindow):
             "- 大きい: 速い（少し動かすだけで大きくスクロール）\n"
             "- 小さい: 細かい（長い距離のスクロールは遅い）"
         )
-        ss.valueChanged.connect(lambda v: self._set_value("control.scroll_sensitivity", int(v)))
+        self._bind_setting("control.scroll_sensitivity", ss)
         layout.addRow("スクロール感度", ss)
 
         sd = QDoubleSpinBox()
         sd.setRange(0.0, 0.05)
         sd.setSingleStep(0.001)
+        sd.setDecimals(4)
+        self._tune_double_spin(sd)
         sd.setValue(float(s.control.scroll_deadzone))
         sd.setToolTip(
             "スクロール開始のデッドゾーンです。\n"
             "- 大きい: 勝手スクロールが減る（意図したスクロール開始が難しい）\n"
             "- 小さい: すぐ反応（勝手スクロールが起きやすい）"
         )
-        sd.valueChanged.connect(lambda v: self._set_value("control.scroll_deadzone", float(v)))
+        self._bind_setting("control.scroll_deadzone", sd)
         layout.addRow("スクロール死域", sd)
 
         return g
@@ -550,10 +824,12 @@ class MainWindow(QMainWindow):
         # （研究用途での誤入力防止。必要なら次回QLineEditで編集可能にする）
         dir_label = QLabel(str(s.logging.log_dir))
         dir_label.setToolTip("ログ保存先ディレクトリです（現在はGUIから編集不可）。")
+        self._log_dir_label = dir_label
         layout.addRow("保存先", dir_label)
 
         file_label = QLabel(str(s.logging.log_file_name))
         file_label.setToolTip("ログファイル名です（現在はGUIから編集不可）。")
+        self._log_file_label = file_label
         layout.addRow("ファイル名", file_label)
 
         mb = QSpinBox()
@@ -561,20 +837,20 @@ class MainWindow(QMainWindow):
         mb.setSingleStep(1024 * 1024)
         mb.setValue(int(s.logging.max_bytes))
         mb.setToolTip("このサイズ（bytes）を超えたらローテーションします。")
-        mb.valueChanged.connect(lambda v: self._set_value("logging.max_bytes", int(v)))
+        self._bind_setting("logging.max_bytes", mb)
         layout.addRow("最大サイズ（bytes）", mb)
 
         bc = QSpinBox()
         bc.setRange(0, 100)
         bc.setValue(int(s.logging.backup_count))
         bc.setToolTip("保持するバックアップ数です。")
-        bc.valueChanged.connect(lambda v: self._set_value("logging.backup_count", int(v)))
+        self._bind_setting("logging.backup_count", bc)
         layout.addRow("バックアップ数", bc)
 
         fl = QCheckBox()
         fl.setChecked(bool(s.logging.flush))
         fl.setToolTip("ONにすると各イベントを即時flushします（研究ログの欠落を防止）。")
-        fl.stateChanged.connect(lambda st: self._set_value("logging.flush", bool(st)))
+        self._bind_setting("logging.flush", fl)
         layout.addRow("即時flush", fl)
 
         return g
@@ -585,27 +861,45 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def _set_and_restart(self, dotted: str, value: Any) -> None:
-        self._set_value(dotted, value)
-        self.requestRestartCamera.emit()
-
     # -----------------------------
     # PieMenu settings tab
     # -----------------------------
     def _build_pie_menu_tab(self) -> QWidget:
+        self._pie_bindings.clear()
+        self._pie_preset2_combos.clear()
+        self._pie_extra_buttons.clear()
+
         w = QWidget()
         root = QVBoxLayout(w)
-        root.setContentsMargins(0, 0, 0, 0)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
+
+        pie_edit_row = QHBoxLayout()
+        self._btn_pie_edit = QPushButton("Pie設定を編集")
+        self._btn_pie_apply = QPushButton("変更を適用")
+        self._btn_pie_cancel = QPushButton("キャンセル")
+        self._btn_pie_apply.setVisible(False)
+        self._btn_pie_cancel.setVisible(False)
+        self._btn_pie_edit.clicked.connect(self._on_pie_edit_clicked)
+        self._btn_pie_apply.clicked.connect(self._on_pie_apply_clicked)
+        self._btn_pie_cancel.clicked.connect(self._on_pie_cancel_clicked)
+        pie_edit_row.addWidget(self._btn_pie_edit)
+        pie_edit_row.addWidget(self._btn_pie_apply)
+        pie_edit_row.addWidget(self._btn_pie_cancel)
+        pie_edit_row.addStretch(1)
+        root.addLayout(pie_edit_row)
 
         info = QLabel(
-            "Preset 1 / 3 はユーザー設定です。\n"
+            "表示順は Preset 1 → 2 → 3 です。\n"
+            "Preset 1/3 はユーザー定義、Preset 2 は Media 用の固定アクション配置です。"
             "Type=Shortcut は PyAutoGUI 形式（例: ctrl+shift+p / cmd+space）を想定します。"
         )
         info.setWordWrap(True)
         root.addWidget(info)
 
-        # PieMenuの決定（pinch）しきい値
         s = self._store.get()
+
+        # PieMenuの決定（pinch）しきい値
         th_row = QWidget()
         th_lay = QHBoxLayout(th_row)
         th_lay.setContentsMargins(0, 0, 0, 0)
@@ -614,21 +908,23 @@ class MainWindow(QMainWindow):
         th = QDoubleSpinBox()
         th.setRange(0.02, 0.2)
         th.setSingleStep(0.005)
-        th.setDecimals(3)
+        th.setDecimals(4)
+        self._tune_double_spin(th)
         th.setValue(float(getattr(s.pie_menu, "click_threshold", 0.085)))
         th.setToolTip("PieMenu表示中の決定判定に使う距離しきい値です。大きいほど『つまみ』が浅くても決定します。")
-        th.valueChanged.connect(lambda v: self._set_value("pie_menu.click_threshold", float(v)))
+        self._bind_pie("pie_menu.click_threshold", th)
         th_lay.addWidget(th)
-        root.addWidget(th_row)
-
-        # Preset 2（Media）のスロット配置（固定アクションの並べ替え）
-        root.addWidget(self._group_pie_preset2_layout())
 
         container = QWidget()
         lay = QVBoxLayout(container)
         lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(12)
 
+        lay.addWidget(th_row)
+
+        # Preset 1 → 2 → 3（いずれも同じスクロール内）
         lay.addWidget(self._group_pie_preset("Preset 1 (Custom)", preset_key="custom_1"))
+        lay.addWidget(self._group_pie_preset2_layout())
         lay.addWidget(self._group_pie_preset("Preset 3 (Custom)", preset_key="custom_3"))
         lay.addStretch(1)
 
@@ -639,6 +935,9 @@ class MainWindow(QMainWindow):
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setWidget(container)
         root.addWidget(scroll, 1)
+
+        self._reload_pie_widgets_from_store()
+        self._set_pie_fields_enabled(False)
         return w
 
     def _group_pie_preset2_layout(self) -> QGroupBox:
@@ -658,19 +957,7 @@ class MainWindow(QMainWindow):
             idx = cb.findData(cur)
             cb.setCurrentIndex(idx if idx >= 0 else 0)
 
-            def _on_changed(_, *, slot_idx=i, combo=cb) -> None:
-                # 現在の配列を読んで、該当位置だけ差し替えて保存する
-                try:
-                    cur_s = self._store.get()
-                    ids = list(getattr(cur_s.pie_menu, "preset2_layout"))
-                    if len(ids) != 8:
-                        return
-                    ids[slot_idx - 1] = str(combo.currentData())
-                    self._set_value("pie_menu.preset2_layout", ids)
-                except Exception:
-                    pass
-
-            cb.currentIndexChanged.connect(_on_changed)
+            self._pie_preset2_combos.append(cb)
             form.addRow(f"Slot {i}", cb)
 
         return g
@@ -692,7 +979,7 @@ class MainWindow(QMainWindow):
             label_edit = QLineEdit(str(slot.label))
             label_edit.setPlaceholderText("Label")
             label_path = f"pie_menu.presets.{preset_key}.slots.{i}.label"
-            label_edit.textChanged.connect(lambda v, p=label_path: self._set_value(p, str(v)))
+            self._bind_pie(label_path, label_edit)
             row_lay.addWidget(label_edit, 2)
 
             typ = QComboBox()
@@ -701,28 +988,28 @@ class MainWindow(QMainWindow):
             cur_idx = typ.findData(str(slot.type))
             typ.setCurrentIndex(cur_idx if cur_idx >= 0 else 0)
             type_path = f"pie_menu.presets.{preset_key}.slots.{i}.type"
-            typ.currentIndexChanged.connect(lambda _, cb=typ, p=type_path: self._set_value(p, str(cb.currentData())))
+            self._bind_pie(type_path, typ)
             row_lay.addWidget(typ, 1)
 
             value_edit = QLineEdit(str(slot.value))
             value_edit.setPlaceholderText("Value")
             value_path = f"pie_menu.presets.{preset_key}.slots.{i}.value"
-            value_edit.textChanged.connect(lambda v, p=value_path: self._set_value(p, str(v)))
+            self._bind_pie(value_path, value_edit)
             row_lay.addWidget(value_edit, 3)
 
             browse = QPushButton("参照…")
 
-            def _browse_into_value(*, ve: QLineEdit, p: str) -> None:
+            def _browse_into_value(*, ve: QLineEdit) -> None:
                 try:
                     path, _ = QFileDialog.getOpenFileName(self, "アプリ/ファイルを選択")
                     if not path:
                         return
                     ve.setText(path)
-                    self._set_value(p, str(path))
                 except Exception:
                     pass
 
-            browse.clicked.connect(lambda _, ve=value_edit, p=value_path: _browse_into_value(ve=ve, p=p))
+            browse.clicked.connect(lambda _, ve=value_edit: _browse_into_value(ve=ve))
+            self._pie_extra_buttons.append(browse)
             row_lay.addWidget(browse)
 
             form.addRow(f"Slot {i}", row)
@@ -735,8 +1022,8 @@ class MainWindow(QMainWindow):
     def _build_motion_tab(self) -> QWidget:
         w = QWidget()
         root = QVBoxLayout(w)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(6)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(10)
 
         ctl_row = QHBoxLayout()
         self._preview_cb = QCheckBox("プレビュー表示（重い）")
@@ -847,6 +1134,13 @@ class MainWindow(QMainWindow):
         self._status_label.setText(f"error: {msg}")
 
     def _on_tab_changed(self, idx: int) -> None:
+        old = int(getattr(self, "_prev_tab_index", 0))
+        if old == 0 and idx != 0 and self._settings_edit_mode:
+            self._on_settings_cancel_clicked()
+        if old == 1 and idx != 1 and self._pie_edit_mode:
+            self._on_pie_cancel_clicked()
+        self._prev_tab_index = int(idx)
+
         # モーションタブが見えている時だけプレビューをONにする
         is_motion = self._tabs.tabText(idx) == "モーションテスト"
         self.previewEnabledChanged.emit(bool(is_motion and self._preview_cb.isChecked()))
@@ -860,6 +1154,8 @@ class MainWindow(QMainWindow):
     def _build_log_tab(self) -> QWidget:
         w = QWidget()
         root = QVBoxLayout(w)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(8)
 
         self._log_view = QTextEdit()
         self._log_view.setReadOnly(True)
@@ -899,6 +1195,8 @@ class MainWindow(QMainWindow):
     def _build_manual_tab(self) -> QWidget:
         w = QWidget()
         root = QVBoxLayout(w)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
         btn_row = QHBoxLayout()
         reload_btn = QPushButton("マニュアル再読込")
         reload_btn.setToolTip("docs/ 内の Markdown をディスクから読み直して表示を更新します。")

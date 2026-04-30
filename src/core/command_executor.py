@@ -58,6 +58,13 @@ class CommandExecutor:
                 if k in ("volumeup", "volumedown", "volumemute"):
                     return CommandExecutor._mac_volume(k)
 
+            # Windows: Core Audio（既定再生デバイス）を直接操作。pycaw 未導入時は後段の pyautogui にフォールバック。
+            if os.name == "nt" and len(keys) == 1:
+                k = keys[0]
+                if k in ("volumeup", "volumedown", "volumemute"):
+                    if CommandExecutor._win_volume(k):
+                        return True
+
             if len(keys) == 1:
                 pyautogui.press(keys[0])
             else:
@@ -98,6 +105,43 @@ class CommandExecutor:
             return True
         except Exception:
             return False
+
+    @staticmethod
+    def _win_volume(kind: str) -> bool:
+        """Windows の既定出力デバイス音量を Core Audio（IAudioEndpointVolume）で変更する。
+
+        macOS の osascript と同様、フォーカスやキーボードレイアウトに依存しない。
+        ステップは mac の ±6（0..100）に近づけるため、スカラーで約 ±0.06 とする。
+        """
+
+        kind = str(kind).strip().lower()
+        try:
+            from pycaw.pycaw import AudioUtilities
+        except Exception:
+            return False
+        try:
+            speakers = AudioUtilities.GetSpeakers()
+            if speakers is None:
+                return False
+            vol = speakers.EndpointVolume
+            # 0.0..1.0（スカラー）。mac の 6% 刻みに概ね合わせる
+            step = 0.06
+            if kind == "volumeup":
+                cur = float(vol.GetMasterVolumeLevelScalar())
+                vol.SetMasterVolumeLevelScalar(min(1.0, cur + step), None)
+                vol.SetMute(False, None)
+                return True
+            if kind == "volumedown":
+                cur = float(vol.GetMasterVolumeLevelScalar())
+                vol.SetMasterVolumeLevelScalar(max(0.0, cur - step), None)
+                return True
+            if kind == "volumemute":
+                muted = bool(vol.GetMute())
+                vol.SetMute(not muted, None)
+                return True
+        except Exception:
+            return False
+        return False
 
     @staticmethod
     def _open_application(path: str) -> bool:
