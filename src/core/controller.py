@@ -80,9 +80,8 @@ class MouseController:
         # 「一瞬だけ伸びた」でクリックが無効化されるのを防ぐ。
         self._click_pose_active: bool = False
 
-        # 中指を「曲げ始めた瞬間」に、人差し指先が微妙に引っ張られてカーソルが動くことがある。
-        # middle_extended が False になる前でも、middle TIP(12) の下方向移動（y増加）を検知したら
-        # 短時間だけアンカー（移動停止）を入れてクリック狙いのズレを抑える。
+        # 中指を「曲げ始めた瞬間」に人差し指先が引っ張られてカーソルが動くことがある。
+        # middle TIP(12) の下方向移動を検知したら短時間だけアンカー（移動停止）を入れる。
         self._prev_middle_tip_y: Optional[float] = None
         self._middle_motion_freeze_until_ms: int = 0
 
@@ -298,15 +297,16 @@ class MouseController:
                 lm = det.hand_landmarks
                 y = float(lm[12].y)
                 if self._prev_middle_tip_y is not None:
-                    dy = float(y) - float(self._prev_middle_tip_y)
+                    dy_tip = float(y) - float(self._prev_middle_tip_y)
                     # 画像座標は下方向が+。中指が曲がる動作は TIP が下がりやすい。
-                    if dy > 0.008:
-                        self._middle_motion_freeze_until_ms = max(self._middle_motion_freeze_until_ms, int(now_ms + 180))
+                    if dy_tip > 0.008:
+                        self._middle_motion_freeze_until_ms = max(
+                            self._middle_motion_freeze_until_ms, int(now_ms + 180)
+                        )
                 self._prev_middle_tip_y = float(y)
             else:
                 self._prev_middle_tip_y = None
         except Exception:
-            # 検出失敗時は安全側でリセット
             self._prev_middle_tip_y = None
 
         if int(now_ms) < int(self._middle_motion_freeze_until_ms):
@@ -321,11 +321,21 @@ class MouseController:
 
         suppress_move_middle = bool(settings.control.move_suppress_on_middle_bent) and self._click_pose_active
 
-        # ドラッグ中は「中指曲げで移動抑制」を移動固定に使わない（範囲選択の移動を阻害しやすいため）
+        # ドラッグ中は「中指曲げで移動抑制」をアンカー固定に使わない（範囲選択の移動を阻害しやすいため）
         suppress_move_middle_for_anchor = suppress_move_middle and (not self._dragging)
 
+        # middle_motion_freeze を無条件で足すと、縦移動で中指TIPの y が毎フレーム大きく変わり
+        # アンカーが連続して「上下だけ効かない」状態になりやすい。
+        # クリック文脈（クリック予備姿勢・親指予兆・接触）があるときだけフリーズをアンカーに効かせる。
+        middle_motion_freeze_for_anchor = bool(middle_motion_freeze) and (
+            self._click_pose_active or pre_contact or bool(det.contact)
+        )
+
         anchoring_active_raw = bool(anch_cfg.enabled) and (
-            bool(det.contact) or pre_contact or suppress_move_middle_for_anchor or middle_motion_freeze
+            bool(det.contact)
+            or pre_contact
+            or suppress_move_middle_for_anchor
+            or middle_motion_freeze_for_anchor
         )
         # 要望: ドラッグ（mouseDown確定）後は移動を許可するため、アンカーによる移動停止を無効化する。
         anchoring_freeze = bool(anchoring_active_raw) and (not self._dragging)
@@ -411,8 +421,6 @@ class MouseController:
             if roi.enabled:
                 x = (x - roi.x) / max(roi.w, 1e-9)
                 y = (y - roi.y) / max(roi.h, 1e-9)
-                x = min(max(float(x), 0.0), 1.0)
-                y = min(max(float(y), 0.0), 1.0)
 
             # GUIプレビューと同様、ユーザー視点で直感的になるようXを反転する
             x = 1.0 - float(x)
@@ -452,8 +460,14 @@ class MouseController:
         dy_norm = float(pointer_xy[1]) - float(prev_y)
         self._mouse_prev_hand_xy = pointer_xy
 
+        # 正規化空間では縦方向のΔが横より小さく出やすい（ROI・構図）。既定で軽くブーストする。
+        dy_norm *= float(settings.control.relative_move_vertical_gain)
+
         # ノイズ抑制（デッドゾーン）＋急ジャンプ抑制（クランプ）
         deadzone = float(settings.control.relative_move_deadzone)
+        # move_suppress_on_middle_bent: クリック予備姿勢では完全固定せず、微小Δだけやや鈍くする
+        if bool(settings.control.move_suppress_on_middle_bent) and self._click_pose_active and (not self._dragging):
+            deadzone *= 2.5
         if abs(dx_norm) < deadzone:
             dx_norm = 0.0
         if abs(dy_norm) < deadzone:

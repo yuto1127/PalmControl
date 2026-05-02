@@ -130,6 +130,7 @@ class VisionControlWorker(QThread):
         self._controller: Optional[MouseController] = None
         self._cap: Optional[cv2.VideoCapture] = None
         self._last_capture_error_ms: int = 0
+        self._last_camera_error_emit_ms: int = 0
 
         # PieMenu連携用（GUI側でオーバーレイ表示を行う）
         self._pie_active: bool = False
@@ -138,6 +139,7 @@ class VisionControlWorker(QThread):
         self._pie_open_streak: int = 0
         self._pie_close_streak: int = 0
         self._pie_pointer_contact_prev: bool = False
+        self._pie_first_pinch_edge_ms: Optional[int] = None
 
     @pyqtSlot(bool)
     def setPreviewEnabled(self, enabled: bool) -> None:
@@ -195,7 +197,10 @@ class VisionControlWorker(QThread):
                             "camera.read_failed",
                             {"reason": "cap.read returned empty frame"},
                         )
-                    self.error.emit("フレームを取得できませんでした（カメラ権限/接続を確認）。")
+                    # GUI への error は短時間に大量発火しない（環境によっては通知・状態表示が不安定になる）
+                    if (now_ms - self._last_camera_error_emit_ms) >= 4000:
+                        self._last_camera_error_emit_ms = now_ms
+                        self.error.emit("フレームを取得できませんでした（カメラ権限/接続を確認）。")
                     time.sleep(0.2)
                     continue
 
@@ -301,18 +306,34 @@ class VisionControlWorker(QThread):
                         except Exception:
                             ctrl = {}
 
-                    # PieMenuの確定（クリック）:
-                    # クリック系のタップ判定は「操作のための姿勢変化」で取りこぼしやすいので、
-                    # PieMenu表示中は contact ではなく「距離(contact_distance)」で確定し、反応を軽くする。
+                    # PieMenuの確定（ダブルクリック相当）:
+                    # 「つまみ開始」エッジを2回（離しつつ間隔内）検出したら確定。誤発火を抑える。
                     pie_click = False
+                    now_pinch_ms = int(time.time() * 1000)
                     if self._pie_active and pointer_det is not None:
                         d = getattr(pointer_det, "contact_distance", None)
                         th = float(getattr(settings.pie_menu, "click_threshold", 0.085))
                         cur = bool(d is not None and float(d) <= th)
-                        pie_click = bool(cur and (not self._pie_pointer_contact_prev))
+                        edge_in = bool(cur and (not self._pie_pointer_contact_prev))
                         self._pie_pointer_contact_prev = bool(cur)
+
+                        max_gap = int(getattr(settings.pie_menu, "confirm_double_pinch_max_gap_ms", 900))
+                        if edge_in:
+                            if self._pie_first_pinch_edge_ms is not None:
+                                dt = now_pinch_ms - int(self._pie_first_pinch_edge_ms)
+                                if 0 < dt <= max_gap:
+                                    pie_click = True
+                                    self._pie_first_pinch_edge_ms = None
+                                else:
+                                    self._pie_first_pinch_edge_ms = now_pinch_ms
+                            else:
+                                self._pie_first_pinch_edge_ms = now_pinch_ms
+                        if self._pie_first_pinch_edge_ms is not None:
+                            if (now_pinch_ms - int(self._pie_first_pinch_edge_ms)) > max_gap:
+                                self._pie_first_pinch_edge_ms = None
                     else:
                         self._pie_pointer_contact_prev = False
+                        self._pie_first_pinch_edge_ms = None
 
                     # プリセット切替は「中央クリック」に寄せる（スクロール切替は無効化）
                     preset_step = 0

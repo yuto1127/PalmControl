@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
-from PyQt6.QtCore import QLocale, QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QImage, QPainter, QPixmap
+import sys
+
+from PyQt6.QtCore import QEvent, QLocale, QTimer, Qt, pyqtSignal
+from PyQt6.QtGui import QGuiApplication, QImage, QKeyEvent, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
@@ -71,6 +73,166 @@ class _AspectFitPixmapLabel(QWidget):
         x = (target.width() - pix.width()) // 2
         y = (target.height() - pix.height()) // 2
         painter.drawPixmap(x, y, pix)
+
+
+def _format_shortcut_from_key_event(ev: QKeyEvent) -> Optional[str]:
+    """Qtのキーイベントから 'ctrl+shift+p' / 'command+c'（PyAutoGUI想定）形式へ整形する。"""
+
+    key = int(ev.key())
+    if key in (
+        int(Qt.Key.Key_Control),
+        int(Qt.Key.Key_Shift),
+        int(Qt.Key.Key_Alt),
+        int(Qt.Key.Key_Meta),
+    ):
+        return None
+
+    # 修飾キーの順序（イベント単体では macOS の物理 Ctrl が欠けることがあるのでキーボード状態も併用）
+    mods: List[str] = []
+    m = ev.modifiers()
+    try:
+        app = QGuiApplication.instance()
+        if app is not None:
+            m |= app.keyboardModifiers()
+    except Exception:
+        pass
+
+    # macOS: Qt は Command を ControlModifier、物理 Ctrl を MetaModifier として扱うことが多い。PyAutoGUI では command が正式名。
+    if sys.platform.startswith("darwin"):
+        if bool(m & Qt.KeyboardModifier.MetaModifier):
+            mods.append("ctrl")
+        if bool(m & Qt.KeyboardModifier.ControlModifier):
+            mods.append("command")
+    else:
+        if bool(m & Qt.KeyboardModifier.MetaModifier):
+            mods.append("win")
+        if bool(m & Qt.KeyboardModifier.ControlModifier):
+            mods.append("ctrl")
+    if bool(m & Qt.KeyboardModifier.AltModifier):
+        mods.append("alt")
+    if bool(m & Qt.KeyboardModifier.ShiftModifier):
+        mods.append("shift")
+
+    # 文字キーは text 優先（レイアウト依存のため）
+    # NOTE: strip() するとスペースが消えるので使わない
+    t = ev.text() or ""
+
+    # Ctrl+英字は text が制御文字（^C=\x03）になる。修飾子ビットが欠けてもここで復元できる。
+    if len(t) == 1:
+        oc = ord(t)
+        if 1 <= oc <= 26:
+            letter = chr(ord("a") + oc - 1)
+            if "ctrl" not in mods:
+                if sys.platform.startswith("darwin") and "command" not in mods:
+                    mods.insert(0, "ctrl")
+                elif bool(m & Qt.KeyboardModifier.ControlModifier):
+                    mods.insert(0, "ctrl")
+            return "+".join([*mods, letter])
+
+    if t == " ":
+        main = "space"
+    elif t and len(t) == 1 and t.isprintable() and t not in ("\r", "\n", "\t"):
+        main = t.lower()
+    else:
+        # 特殊キー
+        special = {
+            int(Qt.Key.Key_Space): "space",
+            int(Qt.Key.Key_Return): "enter",
+            int(Qt.Key.Key_Enter): "enter",
+            int(Qt.Key.Key_Escape): "esc",
+            int(Qt.Key.Key_Tab): "tab",
+            int(Qt.Key.Key_Backspace): "backspace",
+            int(Qt.Key.Key_Delete): "delete",
+            int(Qt.Key.Key_Left): "left",
+            int(Qt.Key.Key_Right): "right",
+            int(Qt.Key.Key_Up): "up",
+            int(Qt.Key.Key_Down): "down",
+            int(Qt.Key.Key_Home): "home",
+            int(Qt.Key.Key_End): "end",
+            int(Qt.Key.Key_PageUp): "pageup",
+            int(Qt.Key.Key_PageDown): "pagedown",
+        }
+        if key in special:
+            main = special[key]
+        elif int(Qt.Key.Key_F1) <= key <= int(Qt.Key.Key_F24):
+            main = f"f{key - int(Qt.Key.Key_F1) + 1}"
+        elif int(Qt.Key.Key_0) <= key <= int(Qt.Key.Key_9):
+            main = str(key - int(Qt.Key.Key_0))
+        else:
+            # 記号キー（US配列相当の名称へ寄せる）
+            punct = {
+                int(Qt.Key.Key_Minus): "-",
+                int(Qt.Key.Key_Equal): "=",
+                int(Qt.Key.Key_BracketLeft): "[",
+                int(Qt.Key.Key_BracketRight): "]",
+                int(Qt.Key.Key_Backslash): "\\",
+                int(Qt.Key.Key_Semicolon): ";",
+                int(Qt.Key.Key_Apostrophe): "'",
+                int(Qt.Key.Key_Comma): ",",
+                int(Qt.Key.Key_Period): ".",
+                int(Qt.Key.Key_Slash): "/",
+                int(Qt.Key.Key_QuoteLeft): "`",
+            }
+            if key in punct:
+                main = punct[key]
+            else:
+                return None
+
+    parts = [*mods, main] if main else mods
+    if not parts:
+        return None
+    return "+".join(parts)
+
+
+class ShortcutValueLineEdit(QLineEdit):
+    """Pie の Shortcut Value 用: macOS の Cmd 系が OS/Qt に食われにくいよう直接キャプチャする。"""
+
+    def __init__(self, type_combo: QComboBox, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._typ = type_combo
+        try:
+            self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, False)
+        except Exception:
+            pass
+
+    def event(self, e: QEvent) -> bool:  # type: ignore[override]
+        # Qt がショートカットとして先に処理する前に拾う（特に macOS の Meta 組み合わせ）
+        try:
+            if e.type() == QEvent.Type.ShortcutOverride and str(self._typ.currentData()) == "shortcut":
+                if hasattr(e, "key") and hasattr(e, "modifiers"):
+                    keyev = e  # QKeyEvent（ShortcutOverride）
+                    key = int(keyev.key())
+                    if key in (int(Qt.Key.Key_Backspace), int(Qt.Key.Key_Delete)):
+                        self.setText("")
+                        e.accept()
+                        return True
+                    s = _format_shortcut_from_key_event(keyev)  # type: ignore[arg-type]
+                    if s:
+                        self.setText(s)
+                        e.accept()
+                        return True
+        except Exception:
+            pass
+        return super().event(e)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
+        if str(self._typ.currentData()) != "shortcut":
+            super().keyPressEvent(event)
+            return
+
+        key = int(event.key())
+        if key in (int(Qt.Key.Key_Backspace), int(Qt.Key.Key_Delete)):
+            self.setText("")
+            event.accept()
+            return
+
+        s = _format_shortcut_from_key_event(event)
+        if s:
+            self.setText(s)
+            event.accept()
+            return
+
+        super().keyPressEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -697,6 +859,19 @@ class MainWindow(QMainWindow):
         self._bind_setting("control.relative_move_deadzone", dz)
         layout.addRow("死域（ブレ無視）", dz)
 
+        vg = QDoubleSpinBox()
+        vg.setRange(0.5, 4.0)
+        vg.setSingleStep(0.05)
+        vg.setDecimals(2)
+        self._tune_double_spin(vg)
+        vg.setValue(float(getattr(s.control, "relative_move_vertical_gain", 1.35)))
+        vg.setToolTip(
+            "相対移動の縦方向だけの倍率です（横は 1 固定）。\n"
+            "カメラ構図や ROI で「縦に動かしてもΔが小さい」ときに上げます（例: 1.35〜2.0）。"
+        )
+        self._bind_setting("control.relative_move_vertical_gain", vg)
+        layout.addRow("縦移動ブースト倍率", vg)
+
         cl = QDoubleSpinBox()
         # settings.yaml の既定が 0.25 のため、上限 0.2 だと範囲外になり編集が破綻しやすい
         cl.setRange(0.001, 0.5)
@@ -891,8 +1066,9 @@ class MainWindow(QMainWindow):
 
         info = QLabel(
             "表示順は Preset 1 → 2 → 3 です。\n"
-            "Preset 1/3 はユーザー定義、Preset 2 は Media 用の固定アクション配置です。"
-            "Type=Shortcut は PyAutoGUI 形式（例: ctrl+shift+p / cmd+space）を想定します。"
+            "Preset 1/3 はユーザー定義、Preset 2 は Media 用の固定アクション配置です。\n"
+            "項目の実行確定は『ダブルピンチ』（つまみを離して再度つまむ）です。\n"
+            "Type=Shortcut は PyAutoGUI 形式（例: ctrl+shift+p / command+space）を想定します。"
         )
         info.setWordWrap(True)
         root.addWidget(info)
@@ -911,9 +1087,27 @@ class MainWindow(QMainWindow):
         th.setDecimals(4)
         self._tune_double_spin(th)
         th.setValue(float(getattr(s.pie_menu, "click_threshold", 0.085)))
-        th.setToolTip("PieMenu表示中の決定判定に使う距離しきい値です。大きいほど『つまみ』が浅くても決定します。")
+        th.setToolTip(
+            "PieMenu表示中の『つまみ』判定に使う距離です。\n"
+            "確定自体はダブルピンチ（下記の間隔内に2回つまみ開始）です。"
+        )
         self._bind_pie("pie_menu.click_threshold", th)
         th_lay.addWidget(th)
+
+        gap_row = QWidget()
+        gap_lay = QHBoxLayout(gap_row)
+        gap_lay.setContentsMargins(0, 0, 0, 0)
+        gap_lay.addWidget(QLabel("確定: 2回つまみの最大間隔（ms・ダブルクリック相当）"))
+        gap = QSpinBox()
+        gap.setRange(200, 4000)
+        gap.setSingleStep(50)
+        gap.setValue(int(getattr(s.pie_menu, "confirm_double_pinch_max_gap_ms", 900)))
+        gap.setToolTip(
+            "1回目のつまみを離し、2回目のつまみ開始までの許容時間です。\n"
+            "短いほど誤確定しにくく、長いほどゆっくりでも確定できます。"
+        )
+        self._bind_pie("pie_menu.confirm_double_pinch_max_gap_ms", gap)
+        gap_lay.addWidget(gap)
 
         container = QWidget()
         lay = QVBoxLayout(container)
@@ -921,6 +1115,7 @@ class MainWindow(QMainWindow):
         lay.setSpacing(12)
 
         lay.addWidget(th_row)
+        lay.addWidget(gap_row)
 
         # Preset 1 → 2 → 3（いずれも同じスクロール内）
         lay.addWidget(self._group_pie_preset("Preset 1 (Custom)", preset_key="custom_1"))
@@ -991,8 +1186,9 @@ class MainWindow(QMainWindow):
             self._bind_pie(type_path, typ)
             row_lay.addWidget(typ, 1)
 
-            value_edit = QLineEdit(str(slot.value))
-            value_edit.setPlaceholderText("Value")
+            value_edit = ShortcutValueLineEdit(typ)
+            value_edit.setText(str(slot.value))
+            value_edit.setPlaceholderText("Value（Shortcutの場合はキー入力で設定）")
             value_path = f"pie_menu.presets.{preset_key}.slots.{i}.value"
             self._bind_pie(value_path, value_edit)
             row_lay.addWidget(value_edit, 3)

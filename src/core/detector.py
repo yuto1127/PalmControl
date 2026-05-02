@@ -41,7 +41,7 @@ class DetectionResult:
     thumb_extended: bool
     index_extended: bool
     middle_extended: bool
-    pointer_xy: Optional[Tuple[float, float]]  # 正規化座標(0..1)。Mouseモード時にのみ有効
+    pointer_xy: Optional[Tuple[float, float]]  # ROI正規化座標（通常は0付近〜1付近、ROI外は範囲外もあり得る）
     contact: bool  # 親指と人差し指が接触（しきい値以下）しているか
     contact_distance: Optional[float]  # 親指-人差し指距離（正規化）。デバッグ用
     handedness: Optional[str]  # "Left" | "Right" | None
@@ -482,7 +482,7 @@ class HandDetector:
           - index_middle_avg: 人差し指先(8)と中指先(12)の平均
           - wrist: 手首(0)。クリック姿勢で指先が動いてもカーソル移動のブレを抑えやすい
         - 接触（クリック）判定は pointer_source に依存せず、従来どおり指先距離で行う
-        - ROIが有効ならROI内で正規化し直し、少ない手の動きで全画面操作しやすくする
+        - ROIが有効ならROI基準で正規化し直す（境界では 0..1 の外にもなり得る。相対移動のΔ用途）
         - 返り値のXは「ユーザー視点で直感的」になるよう鏡補正（mirror_x=Trueなら反転）
         """
 
@@ -504,11 +504,11 @@ class HandDetector:
 
         roi = settings.camera.roi
         if roi.enabled:
-            # ROI内に収めたうえで (roi基準) 0..1 に再正規化する
+            # ROI基準の正規化。相対移動では「縁で y/x が定数に張り付くと dy/dx=0 になり縦/横が効かない」
+            # ため、0..1 へのハードクランプはしない（外側は 0 未満 / 1 超も許可）。
+            # 飛びは controller の relative_move_clamp / deadzone で抑える。
             x = (x - roi.x) / max(roi.w, 1e-9)
             y = (y - roi.y) / max(roi.h, 1e-9)
-            x = min(max(x, 0.0), 1.0)
-            y = min(max(y, 0.0), 1.0)
 
         if self._mirror_x:
             x = 1.0 - x

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import sys
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from src.core.command_executor import CommandExecutor, CommandSpec
 from src.core.media_preset import media_actions_by_id
@@ -31,9 +31,16 @@ def main() -> int:
     app = QApplication(sys.argv)
     apply_modern_theme(app)
 
-    store = ConfigStore()
+    try:
+        store = ConfigStore()
+    except Exception as e:
+        QMessageBox.critical(
+            None,
+            "PalmControl — 設定を読み込めません",
+            f"config/settings.yaml を確認してください。\n\n{e}",
+        )
+        return 1
     worker = VisionControlWorker(store)
-    worker.start()
 
     win = MainWindow(store, worker)
     tray = TrayIcon()
@@ -104,6 +111,10 @@ def main() -> int:
             pass
 
     worker.pieMenuStateReady.connect(_on_pie_state)
+
+    # MainWindow 内で frameReady/statusReady/error を接続した後に開始する。
+    # 先に start すると未取得シグナルが取りこぼされたり、環境によってはエラー通知が安定しない。
+    worker.start()
 
     def show_window() -> None:
         win.show()

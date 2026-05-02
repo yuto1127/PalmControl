@@ -83,6 +83,8 @@ class ControlConfig:
     mouse_mode_stable_frames: int
     relative_move_deadzone: float
     relative_move_clamp_th: float
+    # 相対移動の正規化Δは、カメラ構図で縦成分だけ小さく出やすいため別倍率をかけられるようにする
+    relative_move_vertical_gain: float
     click_requires_middle_bent: bool
     move_suppress_on_middle_bent: bool
     scroll_sensitivity: int
@@ -127,6 +129,8 @@ class PieMenuConfig:
     """PieMenu設定全体。"""
 
     click_threshold: float
+    # 1回目と2回目の「つまみ開始」エッジの最大間隔（ms）。ダブルクリック相当の確定。
+    confirm_double_pinch_max_gap_ms: int
     preset2_layout: Tuple[str, ...]  # 長さ8（Preset 2のスロット配置）
     custom_1: PieMenuPreset
     custom_3: PieMenuPreset
@@ -323,6 +327,10 @@ def _validate_pie_menu(raw: Dict[str, Any]) -> PieMenuConfig:
     if not (0.0 <= float(click_th) <= 0.2):
         raise ValueError("pie_menu.click_threshold は 0.0〜0.2 の範囲である必要があります")
 
+    gap_ms = _as_int(pm.get("confirm_double_pinch_max_gap_ms", 900), name="pie_menu.confirm_double_pinch_max_gap_ms")
+    if not (200 <= int(gap_ms) <= 4000):
+        raise ValueError("pie_menu.confirm_double_pinch_max_gap_ms は 200〜4000 の範囲である必要があります")
+
     layout_raw = pm.get("preset2_layout", None)
     if layout_raw is None:
         layout = default_media_layout()
@@ -333,6 +341,7 @@ def _validate_pie_menu(raw: Dict[str, Any]) -> PieMenuConfig:
 
     return PieMenuConfig(
         click_threshold=float(click_th),
+        confirm_double_pinch_max_gap_ms=int(gap_ms),
         preset2_layout=tuple(layout),
         custom_1=custom_1,
         custom_3=custom_3,
@@ -428,6 +437,10 @@ def _validate_settings_dict(raw: Dict[str, Any]) -> Settings:
         ),
         relative_move_clamp_th=_as_float(
             control.get("relative_move_clamp_th", 0.03), name="control.relative_move_clamp_th"
+        ),
+        relative_move_vertical_gain=_as_float(
+            control.get("relative_move_vertical_gain", 1.35),
+            name="control.relative_move_vertical_gain",
         ),
         click_requires_middle_bent=_as_bool(
             control.get("click_requires_middle_bent", True), name="control.click_requires_middle_bent"

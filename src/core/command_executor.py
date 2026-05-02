@@ -51,6 +51,18 @@ class CommandExecutor:
         if not keys:
             return False
 
+        # GUI やユーザー入力で「cmd」「option」等が混在しても PyAutoGUI の正式名へ寄せる
+        def _normalize_key_token(tok: str) -> str:
+            t = str(tok).strip().lower()
+            if sys.platform.startswith("darwin"):
+                if t == "cmd":
+                    return "command"
+                if t in ("option", "opt"):
+                    return "option"
+            return t
+
+        keys = [_normalize_key_token(k) for k in keys]
+
         try:
             # macOS: 音量系はキー送出より「直接変更」の方が安定する（フォーカス不要）
             if sys.platform.startswith("darwin") and len(keys) == 1:
