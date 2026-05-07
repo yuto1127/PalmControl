@@ -263,7 +263,13 @@ class MouseController:
 
         # --- Action Queueing（タップ/ドラッグ） ---
         # クリック系は「中指が曲がっている」ことを必須条件にする（誤操作防止）
-        if bool(settings.control.click_requires_middle_bent) and (not self._click_pose_active) and (not self._dragging):
+        # ただし contact（ピンチ）が成立している間はユーザー意図が強いので許可する。
+        if (
+            bool(settings.control.click_requires_middle_bent)
+            and (not self._click_pose_active)
+            and (not self._dragging)
+            and (not bool(det.contact))
+        ):
             lc = rc = dd = du = False
             # 状態が残って誤発火しないようリセット
             self._reset_contact_queue_state(apply_actions=act)
@@ -638,17 +644,17 @@ class MouseController:
                     else:
                         break
 
-                # 仕様（研究用の明示割当）:
-                # - 連続タップが「2回」→ 左シングル
-                # - 連続タップが「3回」→ 左ダブル
-                # - 連続タップが「4回以上」→ 右クリック
-                if count >= 4:
+                # クリック割当:
+                # - 1回 → 左シングル
+                # - 2回 → 左ダブル
+                # - 3回以上 → 右クリック
+                if count >= 3:
                     self._mouse_click("right", apply_actions=apply_actions)
                     right_clicked = True
-                elif count == 3:
+                elif count == 2:
                     self._mouse_double_click_left(apply_actions=apply_actions)
                     left_clicked = True
-                elif count == 2:
+                elif count == 1:
                     self._mouse_click("left", apply_actions=apply_actions)
                     left_clicked = True
                 self._tap_times_ms.clear()

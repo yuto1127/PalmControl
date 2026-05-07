@@ -144,6 +144,7 @@ class VisionControlWorker(QThread):
         self._pie_close_streak: int = 0
         self._pie_pointer_contact_prev: bool = False
         self._pie_first_pinch_edge_ms: Optional[int] = None
+        self._pie_last_click_ms: int = 0
         # 利き手検出の瞬断で非利き手座標へ切り替わるとスライスが暴れるため、しきい値フレーム後だけフォールバックする
         self._pie_ptr_missing_frames: int = 0
 
@@ -305,19 +306,10 @@ class VisionControlWorker(QThread):
                     self._pie_scroll_last_step_ms = 0
                     self._pie_ptr_missing_frames = 0
 
-                # PieMenu 中: 利き手が数フレーム欠けるだけで command に切り替えると座標系が跳ぶため遅延フォールバックする。
-                if not self._pie_active:
-                    self._pie_ptr_missing_frames = 0
-                    pie_pointer_src = pointer_det
-                elif pointer_det is not None:
-                    self._pie_ptr_missing_frames = 0
-                    pie_pointer_src = pointer_det
-                else:
-                    self._pie_ptr_missing_frames = min(int(self._pie_ptr_missing_frames) + 1, 500)
-                    if command_det is not None and self._pie_ptr_missing_frames >= int(PIE_POINTER_FALLBACK_FRAMES):
-                        pie_pointer_src = command_det
-                    else:
-                        pie_pointer_src = None
+                # PieMenu の選択/確定は「ポインタ手（利き手）」のみで行う。
+                # コマンド手（非利き手）は「開く/プリセット選択」のみに使い、選択座標には絶対に使わない。
+                self._pie_ptr_missing_frames = 0
+                pie_pointer_src = pointer_det
                 pie_pointer_xy = None
                 if pie_pointer_src is not None:
                     if self._pie_active and self._detector is not None:
@@ -409,20 +401,32 @@ class VisionControlWorker(QThread):
                         edge_in = bool(cur and (not self._pie_pointer_contact_prev))
                         self._pie_pointer_contact_prev = bool(cur)
 
-                        max_gap = int(getattr(settings.pie_menu, "confirm_double_pinch_max_gap_ms", 900))
-                        if edge_in:
-                            if self._pie_first_pinch_edge_ms is not None:
-                                dt = now_pinch_ms - int(self._pie_first_pinch_edge_ms)
-                                if 0 < dt <= max_gap:
-                                    pie_click = True
-                                    self._pie_first_pinch_edge_ms = None
+                        mode = str(os.environ.get("PALMCONTROL_PIE_CLICK_MODE", "double")).strip().lower()
+                        if mode in ("double", "dbl", "2"):
+                            max_gap = int(getattr(settings.pie_menu, "confirm_double_pinch_max_gap_ms", 900))
+                            if edge_in:
+                                if self._pie_first_pinch_edge_ms is not None:
+                                    dt = now_pinch_ms - int(self._pie_first_pinch_edge_ms)
+                                    if 0 < dt <= max_gap:
+                                        pie_click = True
+                                        self._pie_first_pinch_edge_ms = None
+                                    else:
+                                        self._pie_first_pinch_edge_ms = now_pinch_ms
                                 else:
                                     self._pie_first_pinch_edge_ms = now_pinch_ms
-                            else:
-                                self._pie_first_pinch_edge_ms = now_pinch_ms
-                        if self._pie_first_pinch_edge_ms is not None:
-                            if (now_pinch_ms - int(self._pie_first_pinch_edge_ms)) > max_gap:
-                                self._pie_first_pinch_edge_ms = None
+                            if self._pie_first_pinch_edge_ms is not None:
+                                if (now_pinch_ms - int(self._pie_first_pinch_edge_ms)) > max_gap:
+                                    self._pie_first_pinch_edge_ms = None
+                        else:
+                            # 単発ピンチで確定（ユーザビリティ優先）。連打はクールダウンで抑える。
+                            cooldown_ms = 220
+                            try:
+                                cooldown_ms = max(60, int(os.environ.get("PALMCONTROL_PIE_CLICK_COOLDOWN_MS", "220")))
+                            except Exception:
+                                cooldown_ms = 220
+                            if edge_in and (now_pinch_ms - int(self._pie_last_click_ms)) >= int(cooldown_ms):
+                                pie_click = True
+                                self._pie_last_click_ms = int(now_pinch_ms)
                     else:
                         self._pie_pointer_contact_prev = False
                         self._pie_first_pinch_edge_ms = None

@@ -98,7 +98,7 @@ def main() -> int:
                 if p in (1, 2, 3):
                     pie.set_preset(p)
 
-            pie.update_pointer(pointer_xy)
+            pie.update_pointer(pointer_xy, contact=bool(ptr.get("contact")))
 
             # プリセット切替は「中央クリック」へ移行したため、scroll由来の切替は行わない
 

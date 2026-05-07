@@ -56,10 +56,10 @@ def _pie_vector_gain() -> float:
     """PieMenu のスライス選択感度（相対ベクトルの増幅率）。"""
 
     try:
-        v = float(os.environ.get("PALMCONTROL_PIE_GAIN", "2.2"))
+        v = float(os.environ.get("PALMCONTROL_PIE_GAIN", "1.6"))
         return float(max(0.4, min(v, 12.0)))
     except Exception:
-        return 2.2
+        return 1.6
 
 
 def _pie_invert_y() -> bool:
@@ -87,6 +87,36 @@ def _pie_pointer_y_axis() -> str:
 
     v = str(os.environ.get("PALMCONTROL_PIE_Y_AXIS", "up")).strip().lower()
     return "down" if v in ("down", "img", "image", "0") else "up"
+
+
+def _pie_smoothing_alpha() -> float:
+    """相対ベクトルの平滑化（EMA）の係数。大きいほど反応が速いがブレやすい。"""
+
+    try:
+        v = float(os.environ.get("PALMCONTROL_PIE_SMOOTH_ALPHA", "0.45"))
+        return float(max(0.05, min(v, 1.0)))
+    except Exception:
+        return 0.45
+
+
+def _pie_deadzone_enter() -> float:
+    """中央デッドゾーン（入る側）。小さくすると反応が速いが揺れやすい。"""
+
+    try:
+        v = float(os.environ.get("PALMCONTROL_PIE_DEADZONE", "0.050"))
+        return float(max(0.01, min(v, 0.20)))
+    except Exception:
+        return 0.050
+
+
+def _pie_boundary_hysteresis_deg() -> float:
+    """セクタ境界付近のチラつきを抑える角度マージン（度）。"""
+
+    try:
+        v = float(os.environ.get("PALMCONTROL_PIE_BOUNDARY_DEG", "6.0"))
+        return float(max(0.0, min(v, 18.0)))
+    except Exception:
+        return 6.0
 
 
 @dataclass(frozen=True)
@@ -129,6 +159,7 @@ class PieMenuOverlay(QWidget):
         self._last_click_until_ms: int = 0
         self._last_front_refresh_ms: int = 0
         self._selection_arm_until_ms: int = 0
+        self._vec_ema: Tuple[float, float] = (0.0, 0.0)
 
         # applicationスロットのアイコンを描画するためのキャッシュ
         self._icon_provider = QFileIconProvider()
@@ -348,7 +379,7 @@ class PieMenuOverlay(QWidget):
         except Exception:
             pass
 
-    def update_pointer(self, pointer_xy: Optional[Tuple[float, float]]) -> None:
+    def update_pointer(self, pointer_xy: Optional[Tuple[float, float]], *, contact: bool = False) -> None:
         """利き手の pointer_xy を受け取り、固定原点からの相対移動量でスロット選択を更新する。"""
 
         if not self._active:
@@ -364,12 +395,19 @@ class PieMenuOverlay(QWidget):
             self._request_pie_redraw()
             return
 
+        # ピンチ（クリック）中は指形状が変わりやすく、選択がズレやすいのでスロットを凍結する
+        if bool(contact):
+            self._selection = self._selection_latched if latch_valid else self._selection
+            self._request_pie_redraw()
+            return
+
         if now_ms < int(self._selection_arm_until_ms):
             # 開幕直後: 原点を毎フレーム手に合わせ、相対変位ゼロ付近からスライス選択を開始する
             self._pointer_origin_xy = pointer_xy
             self._selection = None
             self._selection_latched = None
             self._selection_latch_until_ms = 0
+            self._vec_ema = (0.0, 0.0)
             self._request_pie_redraw()
             return
 
@@ -392,20 +430,41 @@ class PieMenuOverlay(QWidget):
         if _pie_invert_y():
             dy = -float(dy)
 
-        # 半径が小さい間は「中央（未選択）」扱い（正規化座標; やや広めでチラつき抑制）
-        r = math.sqrt(dx * dx + dy * dy)
-        if r < 0.06:
-            # 中央に戻った瞬間に確定できなくなるのを防ぐため、短時間だけ直前選択を維持する
-            self._selection = self._selection_latched if latch_valid else None
-            self._request_pie_redraw()
-            return
+        # 反応性と安定性の両立: 相対ベクトルを軽く平滑化し、デッドゾーンは「入る/出る」でヒステリシスを付ける
+        a = float(_pie_smoothing_alpha())
+        ex, ey = self._vec_ema
+        ex = (a * float(dx)) + ((1.0 - a) * float(ex))
+        ey = (a * float(dy)) + ((1.0 - a) * float(ey))
+        self._vec_ema = (float(ex), float(ey))
+
+        r = math.sqrt(ex * ex + ey * ey)
+        dz_in = float(_pie_deadzone_enter())
+        dz_out = float(max(0.005, dz_in * 0.72))
+        if self._selection is None:
+            if r < dz_in:
+                self._request_pie_redraw()
+                return
+        else:
+            if r < dz_out:
+                self._selection = None
+                self._request_pie_redraw()
+                return
 
         # 角度（右=0、上=+90、左=180、下=-90）
-        ang = math.degrees(math.atan2(dy, dx)) + float(_pie_rotation_deg())
+        ang = math.degrees(math.atan2(ey, ex)) + float(_pie_rotation_deg())
         # 8分割: 右を1番として時計回りに 1..8
         # セクタ境界を中央に寄せるため、22.5度オフセットを入れる
-        idx0 = int(((ang + 360.0 + 22.5) % 360.0) // 45.0)  # 0..7
-        slot = idx0 + 1
+        frac = ((ang + 360.0 + 22.5) % 360.0) / 45.0
+        idx0 = int(frac // 1.0)  # 0..7
+        slot = int(idx0 + 1)
+
+        # 境界付近でチラつく場合は、直前スロットを維持（ただし大きく振ったときは追従）
+        if self._selection is not None and int(self._selection.slot) != int(slot):
+            margin = float(_pie_boundary_hysteresis_deg())
+            f = float(frac - math.floor(frac))
+            dist_deg = float(min(f, 1.0 - f) * 45.0)
+            if dist_deg < margin and r < float(dz_in * 3.2):
+                slot = int(self._selection.slot)
         self._selection = PieMenuSelection(preset=int(self._preset), slot=int(slot))
         # 選択更新が来たらラッチを更新（クリック姿勢移行で選択が消えないようにする）
         self._selection_latched = self._selection
