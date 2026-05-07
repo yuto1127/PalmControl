@@ -14,6 +14,10 @@ from src.utils.camera import open_camera
 from src.utils.config_loader import ConfigStore, Settings
 from src.utils.logger import LoggingManager
 
+try:
+    PIE_POINTER_FALLBACK_FRAMES = max(4, int(os.environ.get("PALMCONTROL_PIE_POINTER_FALLBACK_FRAMES", "12")))
+except Exception:
+    PIE_POINTER_FALLBACK_FRAMES = 12
 
 HAND_CONNECTIONS = (
     # Thumb
@@ -140,11 +144,42 @@ class VisionControlWorker(QThread):
         self._pie_close_streak: int = 0
         self._pie_pointer_contact_prev: bool = False
         self._pie_first_pinch_edge_ms: Optional[int] = None
+        # 利き手検出の瞬断で非利き手座標へ切り替わるとスライスが暴れるため、しきい値フレーム後だけフォールバックする
+        self._pie_ptr_missing_frames: int = 0
+
+        # 軽量なパフォーマンス観測（GUI表示用）
+        self._last_preview_ms: float = 0.0
+        self._preview_detail: bool = False
+
+        # デバッグ（PieMenuが全画面で出ない切り分け用）
+        self._dbg_last_pie_ms: int = 0
+        self._dbg_last_pie_active: Optional[bool] = None
+
+    @staticmethod
+    def _overlay_debug_enabled() -> bool:
+        # PieMenu デバッグログは別フラグで明示的にONにしたときだけ出す
+        v = str(os.environ.get("PALMCONTROL_PIE_DEBUG", "")).strip().lower()
+        return v in ("1", "true", "yes", "on", "debug")
+
+    def _dbg_pie(self, msg: str) -> None:
+        if not self._overlay_debug_enabled():
+            return
+        try:
+            import sys
+
+            print(f"[PalmControl][worker.pie] {msg}", file=sys.stderr, flush=True)
+        except Exception:
+            pass
 
     @pyqtSlot(bool)
     def setPreviewEnabled(self, enabled: bool) -> None:
         with QMutexLocker(self._mutex):
             self._preview_enabled = bool(enabled)
+
+    @pyqtSlot(bool)
+    def setPreviewDetailEnabled(self, enabled: bool) -> None:
+        with QMutexLocker(self._mutex):
+            self._preview_detail = bool(enabled)
 
     @pyqtSlot(bool)
     def setControlEnabled(self, enabled: bool) -> None:
@@ -174,6 +209,7 @@ class VisionControlWorker(QThread):
             fps = 0.0
             while True:
                 preview_enabled, control_enabled, restart_camera, should_stop = self._snapshot_flags()
+                preview_detail = self._snapshot_preview_detail()
                 if should_stop:
                     break
                 if restart_camera:
@@ -204,7 +240,9 @@ class VisionControlWorker(QThread):
                     time.sleep(0.2)
                     continue
 
+                t_det0 = time.perf_counter()
                 dual = self._detector.process(frame) if self._detector is not None else None
+                det_ms = (time.perf_counter() - t_det0) * 1000.0
 
                 pointer_det = None
                 command_det = None
@@ -265,8 +303,59 @@ class VisionControlWorker(QThread):
                     # 表示開始時はスクロール基準をリセット（プリセット切替の原点）
                     self._pie_scroll_prev_center_y = None
                     self._pie_scroll_last_step_ms = 0
+                    self._pie_ptr_missing_frames = 0
+
+                # PieMenu 中: 利き手が数フレーム欠けるだけで command に切り替えると座標系が跳ぶため遅延フォールバックする。
+                if not self._pie_active:
+                    self._pie_ptr_missing_frames = 0
+                    pie_pointer_src = pointer_det
+                elif pointer_det is not None:
+                    self._pie_ptr_missing_frames = 0
+                    pie_pointer_src = pointer_det
+                else:
+                    self._pie_ptr_missing_frames = min(int(self._pie_ptr_missing_frames) + 1, 500)
+                    if command_det is not None and self._pie_ptr_missing_frames >= int(PIE_POINTER_FALLBACK_FRAMES):
+                        pie_pointer_src = command_det
+                    else:
+                        pie_pointer_src = None
+                pie_pointer_xy = None
+                if pie_pointer_src is not None:
+                    if self._pie_active and self._detector is not None:
+                        sl = self._detector.compute_pie_slice_xy(
+                            getattr(pie_pointer_src, "hand_landmarks", None), settings
+                        )
+                        if sl is not None:
+                            pie_pointer_xy = sl
+                    if pie_pointer_xy is None:
+                        pie_pointer_xy = getattr(pie_pointer_src, "pointer_xy", None)
+                    if self._pie_active and pie_pointer_xy is None:
+                        pie_pointer_xy = self._compute_pie_pointer_xy(pie_pointer_src, settings)
+
+                # デバッグ: PieMenuが出ない原因切り分け（状態変化時 or 1秒間隔）
+                try:
+                    now_ms = int(time.time() * 1000)
+                    if (
+                        self._dbg_last_pie_active is None
+                        or (bool(self._pie_active) != bool(self._dbg_last_pie_active))
+                        or (now_ms - int(self._dbg_last_pie_ms) >= 1000)
+                    ):
+                        self._dbg_last_pie_active = bool(self._pie_active)
+                        self._dbg_last_pie_ms = int(now_ms)
+                        self._dbg_pie(
+                            "active="
+                            f"{int(bool(self._pie_active))} "
+                            f"control_enabled={int(bool(control_enabled))} "
+                            f"command_open={int(bool(command_open))} "
+                            f"open_streak={int(self._pie_open_streak)} close_streak={int(self._pie_close_streak)} "
+                            f"cmd_hand={'yes' if command_det is not None else 'no'} ptr_hand={'yes' if pointer_det is not None else 'no'} "
+                            f"pie_ptr={'yes' if pie_pointer_src is not None else 'no'} "
+                            f"pie_xy={'yes' if pie_pointer_xy is not None else 'no'}"
+                        )
+                except Exception:
+                    pass
 
                 ctrl_out = None
+                ctrl_ms = 0.0
                 # Controllerは常に状態更新（dry-run可）し、GUIのデバッグ表示に使う。
                 # OSへの実操作（pyautogui）は control_enabled=True のときのみ。
                 if pointer_det is not None and self._controller is not None:
@@ -274,9 +363,12 @@ class VisionControlWorker(QThread):
                         # PieMenu表示中はカーソルの「仮想中心固定」を優先するため、OS操作は抑止する。
                         # 実行はPieMenu側（コマンド実行層）で行う。
                         apply = bool(control_enabled) and (not self._pie_active)
+                        t_ctrl0 = time.perf_counter()
                         ctrl_out = self._controller.update(pointer_det, apply_actions=apply)
+                        ctrl_ms = (time.perf_counter() - t_ctrl0) * 1000.0
                     except Exception:
                         ctrl_out = None
+                        ctrl_ms = 0.0
 
                 # FPS計測（表示用）
                 now = time.perf_counter()
@@ -310,8 +402,8 @@ class VisionControlWorker(QThread):
                     # 「つまみ開始」エッジを2回（離しつつ間隔内）検出したら確定。誤発火を抑える。
                     pie_click = False
                     now_pinch_ms = int(time.time() * 1000)
-                    if self._pie_active and pointer_det is not None:
-                        d = getattr(pointer_det, "contact_distance", None)
+                    if self._pie_active and pie_pointer_src is not None:
+                        d = getattr(pie_pointer_src, "contact_distance", None)
                         th = float(getattr(settings.pie_menu, "click_threshold", 0.085))
                         cur = bool(d is not None and float(d) <= th)
                         edge_in = bool(cur and (not self._pie_pointer_contact_prev))
@@ -342,10 +434,10 @@ class VisionControlWorker(QThread):
                         {
                             "active": bool(self._pie_active),
                             "pointer": {
-                                "handedness": getattr(pointer_det, "handedness", None) if pointer_det else None,
-                                "mode": getattr(pointer_det, "mode", "None") if pointer_det else "None",
-                                "pointer_xy": getattr(pointer_det, "pointer_xy", None) if pointer_det else None,
-                                "contact": bool(getattr(pointer_det, "contact", False)) if pointer_det else False,
+                                "handedness": getattr(pie_pointer_src, "handedness", None) if pie_pointer_src else None,
+                                "mode": getattr(pie_pointer_src, "mode", "None") if pie_pointer_src else "None",
+                                "pointer_xy": pie_pointer_xy,
+                                "contact": bool(getattr(pie_pointer_src, "contact", False)) if pie_pointer_src else False,
                                 "left_clicked": bool(pie_click) if self._pie_active else (bool(ctrl.get("left_clicked")) if ctrl else False),
                                 "right_clicked": False,
                             },
@@ -371,6 +463,11 @@ class VisionControlWorker(QThread):
                             "pre_contact": bool(pre_contact),
                             "latency_ms": float(getattr(pointer_det, "latency_ms", 0.0)) if pointer_det else 0.0,
                             "fps": fps,
+                            "perf": {
+                                "detector_ms": float(det_ms),
+                                "controller_ms": float(ctrl_ms),
+                                "preview_ms": float(self._last_preview_ms),
+                            },
                             "index_extended": bool(getattr(pointer_det, "index_extended", False)) if pointer_det else False,
                             "middle_extended": bool(getattr(pointer_det, "middle_extended", False)) if pointer_det else False,
                             "control_enabled": bool(control_enabled),
@@ -381,12 +478,14 @@ class VisionControlWorker(QThread):
 
                 # プレビューは有効時のみ（負荷対策）
                 if preview_enabled and dual is not None:
-                    view = frame.copy()
-                    # 両手を描画（存在するものだけ）
-                    if dual.left is not None:
-                        _draw_landmarks_bgr(view, dual.left.hand_landmarks)
-                    if dual.right is not None:
-                        _draw_landmarks_bgr(view, dual.right.hand_landmarks)
+                    t_prev0 = time.perf_counter()
+                    view = frame.copy() if preview_detail else frame
+                    if preview_detail:
+                        # 両手を描画（存在するものだけ）
+                        if dual.left is not None:
+                            _draw_landmarks_bgr(view, dual.left.hand_landmarks)
+                        if dual.right is not None:
+                            _draw_landmarks_bgr(view, dual.right.hand_landmarks)
                     if pointer_det is not None and getattr(pointer_det, "hand_landmarks", None) is not None:
                         _draw_wrist_tracking_marker_bgr(view, pointer_det.hand_landmarks)
                     # 簡易オーバーレイ
@@ -418,8 +517,10 @@ class VisionControlWorker(QThread):
                     cv2.putText(view, line1, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2, cv2.LINE_AA)
                     cv2.putText(view, line2, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2, cv2.LINE_AA)
                     self.frameReady.emit(_to_qimage(view))
+                    self._last_preview_ms = (time.perf_counter() - t_prev0) * 1000.0
                 else:
                     # プレビューOFF時はQImage生成しない（CPU節約）
+                    self._last_preview_ms = 0.0
                     pass
 
         except Exception as e:
@@ -450,6 +551,10 @@ class VisionControlWorker(QThread):
                 self._restart_camera,
                 self._stop,
             )
+
+    def _snapshot_preview_detail(self) -> bool:
+        with QMutexLocker(self._mutex):
+            return bool(self._preview_detail)
 
     def _open_camera(self, settings: Settings) -> None:
         self._close_camera()
@@ -506,6 +611,30 @@ class VisionControlWorker(QThread):
     @staticmethod
     def _pick_fallback(primary, secondary):
         return primary if primary is not None else secondary
+
+    @staticmethod
+    def _compute_pie_pointer_xy(det, settings: Settings) -> Optional[Tuple[float, float]]:
+        """PieMenu用の座標をランドマークから補完する。
+
+        Detector は Mouse モード以外では pointer_xy を返さないため、PieMenuを開くグー等の
+        command ジェスチャでは座標が欠ける。PieMenu表示中だけは、手首(0)を安定した基準点として使う。
+        """
+
+        lms = getattr(det, "hand_landmarks", None)
+        if lms is None:
+            return None
+        try:
+            x = float(lms[0].x)
+            y = float(lms[0].y)
+            roi = settings.camera.roi
+            if bool(getattr(roi, "enabled", False)):
+                x = (x - float(roi.x)) / max(float(roi.w), 1e-9)
+                y = (y - float(roi.y)) / max(float(roi.h), 1e-9)
+            # HandDetector は mirror_x=True で作っているため、Pie用補完も同じユーザー視点へ合わせる。
+            x = 1.0 - x
+            return float(x), float(y)
+        except Exception:
+            return None
 
     def _assign_roles(self, dual: DualHandResult, settings: Settings):
         """利き手設定に基づき、pointer(利き手)とcommand(非利き手)を返す。"""

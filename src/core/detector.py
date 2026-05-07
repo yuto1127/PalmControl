@@ -514,3 +514,26 @@ class HandDetector:
             x = 1.0 - x
         return (float(x), float(y))
 
+    def compute_pie_slice_xy(self, hand_landmarks, settings: Settings) -> Optional[Tuple[float, float]]:
+        """PieMenu のスライス角用座標（人差し指先ランドマーク 8 のみ）。
+
+        `pointer_source=wrist` だと手首の Δ が小さく 8 方向のうち一部にしか入らないことがあるため、
+        メニュー選択だけは指先ベースで全周つかめるようにする。
+        """
+
+        if hand_landmarks is None:
+            return None
+        try:
+            lm = hand_landmarks
+            x = float(lm[8].x)
+            y = float(lm[8].y)
+            roi = settings.camera.roi
+            if roi.enabled:
+                x = (x - roi.x) / max(roi.w, 1e-9)
+                y = (y - roi.y) / max(roi.h, 1e-9)
+            if self._mirror_x:
+                x = 1.0 - x
+            return (float(x), float(y))
+        except Exception:
+            return None
+

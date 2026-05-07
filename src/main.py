@@ -91,13 +91,14 @@ def main() -> int:
                 pointer_xy = None
 
             pie.set_active(active, pointer_xy=pointer_xy)
-            pie.update_pointer(pointer_xy)
 
-            # 非利き手ジェスチャーに応じてプリセットを固定表示（中央クリックでの循環も可能）
+            # 非利き手ジェスチャーのプリセット。スライス角計算より先に適用する。
             if active:
                 p = int(cmd.get("preset") or 0)
                 if p in (1, 2, 3):
                     pie.set_preset(p)
+
+            pie.update_pointer(pointer_xy)
 
             # プリセット切替は「中央クリック」へ移行したため、scroll由来の切替は行わない
 

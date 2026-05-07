@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import os
+import sys
 import time
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
@@ -12,8 +14,79 @@ from PyQt6.QtWidgets import QApplication, QFileIconProvider, QWidget
 from PyQt6.QtCore import QFileInfo
 
 from src.utils.config_loader import ConfigStore, PieMenuSlot
-from src.utils.macos_overlay import apply_fullscreen_auxiliary_collection_behavior
+from src.utils.macos_overlay import apply_macos_overlay_hints, hide_panel_overlay, is_macos_overlay_available, show_panel_overlay
 from src.core.media_preset import media_actions_by_id
+
+
+def _overlay_debug_enabled() -> bool:
+    # PieMenu はフレーム毎に呼ばれ得るため、別フラグで明示的にONにしたときだけ出す。
+    v = str(os.environ.get("PALMCONTROL_PIE_DEBUG", "")).strip().lower()
+    return v in ("1", "true", "yes", "on", "debug")
+
+
+def _overlay_dbg(msg: str) -> None:
+    if not _overlay_debug_enabled():
+        return
+    try:
+        import sys
+
+        print(f"[PalmControl][pie_menu] {msg}", file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
+def _selection_arm_duration_ms() -> int:
+    """PieMenu 表示直後はノイズで右セクタ等に入りやすいため、この時間は原点を手に追従させスロットを確定しない。"""
+
+    try:
+        v = int(os.environ.get("PALMCONTROL_PIE_ARM_MS", "220"))
+        return max(0, min(v, 1200))
+    except Exception:
+        return 220
+
+
+def _pie_warp_cursor_enabled() -> bool:
+    """表示開始時に OS カーソルを PieMenu 中央へ移す（既定 ON）。0/false/off で無効。"""
+
+    v = str(os.environ.get("PALMCONTROL_PIE_WARP_CURSOR", "1")).strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def _pie_vector_gain() -> float:
+    """PieMenu のスライス選択感度（相対ベクトルの増幅率）。"""
+
+    try:
+        v = float(os.environ.get("PALMCONTROL_PIE_GAIN", "2.2"))
+        return float(max(0.4, min(v, 12.0)))
+    except Exception:
+        return 2.2
+
+
+def _pie_invert_y() -> bool:
+    """環境差で上下が反転するケース向けの補正（既定OFF）。"""
+
+    v = str(os.environ.get("PALMCONTROL_PIE_INVERT_Y", "0")).strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def _pie_rotation_deg() -> float:
+    """角度の最終補正（度）。90/180 などで直感に合わせられる。"""
+
+    try:
+        return float(os.environ.get("PALMCONTROL_PIE_ROT_DEG", "0"))
+    except Exception:
+        return 0.0
+
+
+def _pie_pointer_y_axis() -> str:
+    """pointer_xy の Y 軸の向き。
+
+    - down: 下が+（MediaPipe/画像座標系の一般的な向き）
+    - up: 上が+（どこかで反転済みの入力）
+    """
+
+    v = str(os.environ.get("PALMCONTROL_PIE_Y_AXIS", "up")).strip().lower()
+    return "down" if v in ("down", "img", "image", "0") else "up"
 
 
 @dataclass(frozen=True)
@@ -30,8 +103,9 @@ class PieMenuOverlay(QWidget):
     重要な意図:
     - 表示/非表示は「非利き手がパーかどうか」により外部（Worker）から制御される。
     - 非表示時は入力透過にし、通常のPC操作を妨げない。
-    - 表示開始瞬間にマウス座標をメニュー中央へワープし、ユーザー視点の「仮想中心」を固定する。
-    - スロット選択は、利き手の pointer_xy（正規化座標）の相対変位から角度を算出して行う。
+    - 表示開始時（既定）: OS カーソルをメニュー中央へ移し、画面操作の基準を中央に合わせる。
+    - スロット選択はカメラ上の利き手 pointer_xy について、アーム期間終了後に固定した原点からの
+      相対変位（ベクトル）で角度を決める（マウス座標は選択計算に使わない）。
     """
 
     slotTriggered = pyqtSignal(int, int)  # preset(1..3), slot(1..8)
@@ -53,10 +127,14 @@ class PieMenuOverlay(QWidget):
         self._action_msg: str = ""
         self._action_msg_until_ms: int = 0
         self._last_click_until_ms: int = 0
+        self._last_front_refresh_ms: int = 0
+        self._selection_arm_until_ms: int = 0
 
         # applicationスロットのアイコンを描画するためのキャッシュ
         self._icon_provider = QFileIconProvider()
         self._icon_cache: Dict[str, QPixmap] = {}
+
+        self._macos_overlay_ok: bool = bool(is_macos_overlay_available())
 
         self._init_window()
         self._apply_inert_state()
@@ -93,9 +171,9 @@ class PieMenuOverlay(QWidget):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
-            # macOSでは Tool ウィンドウの表示がアプリをアクティブ化しやすい。
-            # ToolTipは「表示してもフォーカスを奪いにくい」性質があるため、オーバーレイ用途に使う。
-            | Qt.WindowType.ToolTip
+            # macOS のネイティブ全画面では ToolTip が描画されない/潜るケースがあるため Tool を使う。
+            # WA_ShowWithoutActivating によりフォーカスを奪いにくくする。
+            | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
@@ -104,30 +182,84 @@ class PieMenuOverlay(QWidget):
 
         # サイズは固定（描画を単純にする）。必要なら後で設定化できる。
         self.resize(520, 520)
-        # プラットフォームウィンドウ生成後に macOS のフルスクリーン空間へ追従させる
-        try:
-            _ = int(self.winId())
-        except Exception:
-            pass
-        apply_fullscreen_auxiliary_collection_behavior(self)
+        # NOTE:
+        # ここ（初期化直後）は NSWindow/NSView の生成タイミング差が大きく、
+        # PyObjC 経由の操作で環境によってはクラッシュし得る。
+        # macOS 向けのヒントは「表示開始時（set_active）」に遅延適用する。
 
     def is_active(self) -> bool:
         return bool(self._active)
+
+    def _native_panel_env_enabled(self) -> bool:
+        v = str(os.environ.get("PALMCONTROL_PANEL_OVERLAY", "")).strip().lower()
+        return v in ("1", "true", "on", "yes")
+
+    def _use_native_pie_visual(self) -> bool:
+        """Qt ウィンドウが全画面動画の下に隠れる環境向けに、NSPanel 上へ円形メニューを描画する。"""
+
+        return sys.platform == "darwin" and bool(is_macos_overlay_available()) and self._native_panel_env_enabled()
+
+    def _sync_native_panel(self) -> None:
+        if not self._active or not self._native_panel_env_enabled():
+            return
+        now_ms = int(time.monotonic() * 1000)
+        labels: list[str] = []
+        icon_paths: list[Optional[str]] = []
+        for slot in range(1, 9):
+            cfg = self._slot_for(self._preset, slot)
+            labels.append(str(cfg.label or f"Slot {slot}")[:48])
+            ip: Optional[str] = None
+            if str(cfg.type).strip().lower() == "application":
+                p = str(cfg.value or "").strip()
+                if p:
+                    fi = QFileInfo(p)
+                    if fi.exists():
+                        c = fi.canonicalFilePath()
+                        ip = str(c) if c else str(fi.absoluteFilePath())
+            icon_paths.append(ip)
+        sel = int(self._selection.slot) if self._selection is not None else None
+        action = ""
+        if self._action_msg and now_ms <= int(self._action_msg_until_ms):
+            action = str(self._action_msg)
+        click = now_ms <= int(self._last_click_until_ms)
+        geo = self.frameGeometry()
+        show_panel_overlay(
+            int(geo.x()),
+            int(geo.y()),
+            int(geo.width()),
+            int(geo.height()),
+            pie_state={
+                "labels": labels,
+                "icon_paths": icon_paths,
+                "preset_title": self._preset_title(),
+                "selection_slot": sel,
+                "subtitle": "利き手: スロット=実行 / 中央=Preset切替",
+                "action_msg": action,
+                "show_click": click,
+            },
+        )
+
+    def _request_pie_redraw(self) -> None:
+        if self._use_native_pie_visual():
+            self._sync_native_panel()
+        else:
+            self.update()
 
     def set_active(self, active: bool, *, pointer_xy: Optional[Tuple[float, float]] = None) -> None:
         """表示/非表示を切り替える。
 
         active=True になった瞬間:
-        - 現在カーソル位置を中心にウィンドウを移動
-        - カーソルをウィンドウ中心へワープ
-        - pointer_xy の原点（相対変位の基準）を固定
+        - メニューを画面中央へ配置（既定で OS カーソルもその中央へ移動）
+        - 直後のアーム期間中は手の位置に原点を追従させ、その後は原点固定で相対移動からスロットを決める
         """
 
         active = bool(active)
+        _overlay_dbg(f"set_active(active={active}) prev={self._active} pointer_xy={'yes' if pointer_xy is not None else 'no'}")
         if active == self._active:
             # 既に表示中なら origin は固定したまま pointer だけ更新
             if active:
                 self.update_pointer(pointer_xy)
+                self._refresh_frontmost_if_needed()
             return
 
         self._active = active
@@ -137,12 +269,32 @@ class PieMenuOverlay(QWidget):
             self._selection = None
             self._selection_latched = None
             self._selection_latch_until_ms = 0
+            arm = int(_selection_arm_duration_ms())
+            self._selection_arm_until_ms = int(time.monotonic() * 1000) + arm if arm > 0 else 0
             self._move_to_screen_center_and_warp_center()
             self._apply_active_state()
-            self.show()
-            apply_fullscreen_auxiliary_collection_behavior(self)
-            # 1フレーム遅延でもう一度（NSWindow 生成タイミング差の吸収）
-            QTimer.singleShot(0, lambda: apply_fullscreen_auxiliary_collection_behavior(self))
+            if self._use_native_pie_visual():
+                _overlay_dbg("native NSPanel pie (PALMCONTROL_PANEL_OVERLAY); Qt window stays hidden")
+                self._sync_native_panel()
+                QTimer.singleShot(0, self._sync_native_panel)
+                QTimer.singleShot(50, self._sync_native_panel)
+                QTimer.singleShot(200, self._sync_native_panel)
+            else:
+                self.show()
+                _overlay_dbg("show() called; applying macos overlay hints")
+                self._force_frontmost()
+                QTimer.singleShot(0, self._force_frontmost)
+                QTimer.singleShot(50, self._force_frontmost)
+                QTimer.singleShot(200, self._force_frontmost)
+                try:
+                    if self._native_panel_env_enabled():
+                        geo = self.frameGeometry()
+                        _overlay_dbg("PALMCONTROL_PANEL_OVERLAY=1 (no PyObjC pie view) -> banner show_panel_overlay()")
+                        show_panel_overlay(int(geo.x()), int(geo.y()), int(geo.width()), int(geo.height()))
+                except Exception:
+                    pass
+            if self._native_panel_env_enabled() and not self._macos_overlay_ok:
+                self.set_action_feedback("macOS: pyobjc-framework-Cocoa 未導入のため全画面に表示できない可能性があります")
             # raise_() は環境によってアプリが前面化し、操作対象のアプリからフォーカスが奪われることがあるため避ける
         else:
             self._pointer_origin_xy = None
@@ -150,13 +302,54 @@ class PieMenuOverlay(QWidget):
             self._selection = None
             self._selection_latched = None
             self._selection_latch_until_ms = 0
+            self._selection_arm_until_ms = 0
             self._apply_inert_state()
             self.hide()
+            try:
+                hide_panel_overlay()
+            except Exception:
+                pass
 
-        self.update()
+        self._request_pie_redraw()
+
+    def _refresh_frontmost_if_needed(self) -> None:
+        """表示中も定期的に前面化を再適用する。
+
+        動画プレイヤーが後から全画面レイヤーを作ると、初回の orderFront だけでは下に潜ることがある。
+        """
+
+        now_ms = int(time.monotonic() * 1000)
+        if (now_ms - int(self._last_front_refresh_ms)) < 300:
+            return
+        self._last_front_refresh_ms = int(now_ms)
+        if self._use_native_pie_visual():
+            self._sync_native_panel()
+        else:
+            self._force_frontmost()
+
+    def _force_frontmost(self) -> None:
+        if not self._active:
+            return
+        if self._use_native_pie_visual():
+            self._sync_native_panel()
+            return
+        try:
+            self.show()
+        except Exception:
+            pass
+        try:
+            apply_macos_overlay_hints(self)
+        except Exception:
+            pass
+        try:
+            if self._native_panel_env_enabled():
+                geo = self.frameGeometry()
+                show_panel_overlay(int(geo.x()), int(geo.y()), int(geo.width()), int(geo.height()))
+        except Exception:
+            pass
 
     def update_pointer(self, pointer_xy: Optional[Tuple[float, float]]) -> None:
-        """利き手の pointer_xy を受け取り、スロット選択を更新する。"""
+        """利き手の pointer_xy を受け取り、固定原点からの相対移動量でスロット選択を更新する。"""
 
         if not self._active:
             return
@@ -168,28 +361,47 @@ class PieMenuOverlay(QWidget):
         if pointer_xy is None:
             # クリック姿勢などでpointer_xyが一時的に欠けることがあるため、短時間は直前選択を保持する。
             self._selection = self._selection_latched if latch_valid else None
-            self.update()
+            self._request_pie_redraw()
+            return
+
+        if now_ms < int(self._selection_arm_until_ms):
+            # 開幕直後: 原点を毎フレーム手に合わせ、相対変位ゼロ付近からスライス選択を開始する
+            self._pointer_origin_xy = pointer_xy
+            self._selection = None
+            self._selection_latched = None
+            self._selection_latch_until_ms = 0
+            self._request_pie_redraw()
             return
 
         if self._pointer_origin_xy is None:
             self._pointer_origin_xy = pointer_xy
             self._selection = None
-            self.update()
+            self._request_pie_redraw()
             return
 
-        dx = float(pointer_xy[0]) - float(self._pointer_origin_xy[0])
-        dy = float(pointer_xy[1]) - float(self._pointer_origin_xy[1])
+        dx0 = float(pointer_xy[0]) - float(self._pointer_origin_xy[0])
+        dy0 = float(pointer_xy[1]) - float(self._pointer_origin_xy[1])
+        # Y軸の向きは環境差が出るため、入力(pointer_xy)の向きに応じて数学座標（上が+）へ正規化する。
+        # ここで正規化しておくと、描画（0°=右、+90°=上）と選択判定が一致する。
+        gain = float(_pie_vector_gain())
+        dx = float(dx0) * gain
+        if _pie_pointer_y_axis() == "down":
+            dy = float(-dy0) * gain
+        else:
+            dy = float(dy0) * gain
+        if _pie_invert_y():
+            dy = -float(dy)
 
-        # 半径が小さい間は「中央（未選択）」扱い
+        # 半径が小さい間は「中央（未選択）」扱い（正規化座標; やや広めでチラつき抑制）
         r = math.sqrt(dx * dx + dy * dy)
-        if r < 0.02:
+        if r < 0.06:
             # 中央に戻った瞬間に確定できなくなるのを防ぐため、短時間だけ直前選択を維持する
             self._selection = self._selection_latched if latch_valid else None
-            self.update()
+            self._request_pie_redraw()
             return
 
         # 角度（右=0、上=+90、左=180、下=-90）
-        ang = math.degrees(math.atan2(-dy, dx))
+        ang = math.degrees(math.atan2(dy, dx)) + float(_pie_rotation_deg())
         # 8分割: 右を1番として時計回りに 1..8
         # セクタ境界を中央に寄せるため、22.5度オフセットを入れる
         idx0 = int(((ang + 360.0 + 22.5) % 360.0) // 45.0)  # 0..7
@@ -198,7 +410,7 @@ class PieMenuOverlay(QWidget):
         # 選択更新が来たらラッチを更新（クリック姿勢移行で選択が消えないようにする）
         self._selection_latched = self._selection
         self._selection_latch_until_ms = int(now_ms + 700)
-        self.update()
+        self._request_pie_redraw()
 
     def handle_click(self, *, right: bool = False) -> None:
         """クリックイベントを受け取り、スロット実行/中央クリック処理を行う。"""
@@ -210,6 +422,7 @@ class PieMenuOverlay(QWidget):
 
         # デバッグ: クリックが来たこと自体を可視化する
         self._last_click_until_ms = int(time.monotonic() * 1000) + 350
+        self._request_pie_redraw()
 
         # 中央（未選択）クリックはプリセット切替に割り当てる
         if self._selection is None:
@@ -240,7 +453,7 @@ class PieMenuOverlay(QWidget):
             self._selection_latch_until_ms = 0
             self.presetChanged.emit(int(self._preset))
             self.set_action_feedback(f"Preset -> {self._preset}")
-            self.update()
+            self._request_pie_redraw()
 
     def current_preset(self) -> int:
         return int(self._preset)
@@ -258,14 +471,14 @@ class PieMenuOverlay(QWidget):
         self._selection_latched = None
         self._selection_latch_until_ms = 0
         self.presetChanged.emit(int(self._preset))
-        self.update()
+        self._request_pie_redraw()
 
     def set_action_feedback(self, message: str) -> None:
         """直近の実行結果を短時間だけ中央に表示する（デバッグ用途）。"""
 
         self._action_msg = str(message)
         self._action_msg_until_ms = int(time.monotonic() * 1000) + 1200
-        self.update()
+        self._request_pie_redraw()
 
     def _apply_active_state(self) -> None:
         # 表示中は入力を奪わないため、フォーカスは取らない
@@ -282,12 +495,13 @@ class PieMenuOverlay(QWidget):
         self.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus, True)
 
     def _move_to_screen_center_and_warp_center(self) -> None:
-        """PieMenuを画面中央へ固定表示し、カーソルも中央へワープする。"""
+        """PieMenu を画面中央へ置き、既定では OS カーソルをその中央へ移動する。"""
 
         scr = QGuiApplication.screenAt(QCursor.pos())
         if scr is None:
             scr = QApplication.primaryScreen()
-        geo = scr.availableGeometry() if scr is not None else None
+        # 全画面アプリ上では availableGeometry が狭くなる/不正になることがあるため geometry を優先する
+        geo = scr.geometry() if scr is not None else None
         scx = int(geo.center().x()) if geo is not None else 0
         scy = int(geo.center().y()) if geo is not None else 0
 
@@ -296,17 +510,25 @@ class PieMenuOverlay(QWidget):
         h = int(self.height())
         x = int(scx - (w // 2))
         y = int(scy - (h // 2))
+        # 画面外にはみ出して欠けるのを防ぐ（全画面/マルチモニタ/スケール差対策）
+        if geo is not None:
+            min_x = int(geo.left())
+            min_y = int(geo.top())
+            max_x = int(geo.right() - w + 1)
+            max_y = int(geo.bottom() - h + 1)
+            x = max(min_x, min(int(x), max_x))
+            y = max(min_y, min(int(y), max_y))
         self.move(x, y)
 
         cx = int(x + (w // 2))
         cy = int(y + (h // 2))
         self._center_screen_xy = (cx, cy)
 
-        # 仮想中心を固定（カーソルを中央へワープ）
-        try:
-            pyautogui.moveTo(cx, cy)
-        except Exception:
-            pass
+        if _pie_warp_cursor_enabled():
+            try:
+                pyautogui.moveTo(cx, cy)
+            except Exception:
+                pass
 
     def _preset_title(self) -> str:
         if int(self._preset) == 2:
@@ -329,6 +551,8 @@ class PieMenuOverlay(QWidget):
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
         if not self._active:
+            return
+        if self._use_native_pie_visual():
             return
 
         painter = QPainter(self)

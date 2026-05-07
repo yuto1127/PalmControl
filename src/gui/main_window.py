@@ -239,6 +239,7 @@ class MainWindow(QMainWindow):
     """PalmControl GUIメインウィンドウ（研究用）。"""
 
     previewEnabledChanged = pyqtSignal(bool)
+    previewDetailEnabledChanged = pyqtSignal(bool)
     controlEnabledChanged = pyqtSignal(bool)
     requestRestartCamera = pyqtSignal()
     exitRequested = pyqtSignal()
@@ -258,6 +259,14 @@ class MainWindow(QMainWindow):
         self._prev_tab_index = 0
         self._log_dir_label: Optional[QLabel] = None
         self._log_file_label: Optional[QLabel] = None
+
+        # パフォーマンスプリセット（設定編集時にウィジェット値を一括投入する）
+        self._perf_preset_widgets: List[QWidget] = []
+        self._sb_cam_width: Optional[QSpinBox] = None
+        self._sb_cam_height: Optional[QSpinBox] = None
+        self._sb_cam_fps: Optional[QSpinBox] = None
+        self._sb_det_frame_skip: Optional[QSpinBox] = None
+        self._cb_perf_preset: Optional[QComboBox] = None
 
         self.setWindowTitle("PalmControl")
         self.resize(980, 720)
@@ -287,6 +296,7 @@ class MainWindow(QMainWindow):
 
         # GUI → Worker signals
         self.previewEnabledChanged.connect(self._worker.setPreviewEnabled)
+        self.previewDetailEnabledChanged.connect(self._worker.setPreviewDetailEnabled)
         self.controlEnabledChanged.connect(self._worker.setControlEnabled)
         self.requestRestartCamera.connect(self._worker.requestRestartCamera)
 
@@ -402,6 +412,43 @@ class MainWindow(QMainWindow):
     def _set_settings_fields_enabled(self, enabled: bool) -> None:
         for _, w, __ in self._settings_bindings:
             w.setEnabled(enabled)
+        for w in getattr(self, "_perf_preset_widgets", []):
+            try:
+                w.setEnabled(enabled)
+            except Exception:
+                pass
+
+    def _apply_perf_preset_to_widgets(self) -> None:
+        """選択中のパフォーマンスプリセットを、設定ウィジェットへ反映する（保存はしない）。"""
+        cb = getattr(self, "_cb_perf_preset", None)
+        if cb is None:
+            return
+        preset = str(cb.currentData() or "")
+        if not preset:
+            return
+
+        # (width, height, fps, frame_skip)
+        presets = {
+            "light": (360, 270, 60, 1),
+            "balanced": (360, 270, 90, 0),
+            "quality": (360, 270, 120, 0),
+        }
+        if preset not in presets:
+            return
+
+        w, h, fps, fs = presets[preset]
+        for sb, val in (
+            (self._sb_cam_width, w),
+            (self._sb_cam_height, h),
+            (self._sb_cam_fps, fps),
+            (self._sb_det_frame_skip, fs),
+        ):
+            if sb is None:
+                continue
+            try:
+                sb.setValue(int(val))
+            except Exception:
+                pass
 
     def _on_settings_edit_clicked(self) -> None:
         self._settings_edit_mode = True
@@ -492,6 +539,7 @@ class MainWindow(QMainWindow):
     # -----------------------------
     def _build_settings_tab(self) -> QWidget:
         self._settings_bindings.clear()
+        self._perf_preset_widgets.clear()
 
         w = QWidget()
         root = QVBoxLayout(w)
@@ -536,6 +584,21 @@ class MainWindow(QMainWindow):
 
         btn_row.addStretch(1)
         root.addLayout(btn_row)
+
+        preset_row = QHBoxLayout()
+        preset_lab = QLabel("パフォーマンスプリセット")
+        preset_row.addWidget(preset_lab)
+        cb = QComboBox()
+        cb.addItem("—", "")
+        cb.addItem("軽量（60fps / 間引きあり）", "light")
+        cb.addItem("標準（90fps / 間引きなし）", "balanced")
+        cb.addItem("高品質（120fps / 間引きなし）", "quality")
+        cb.setToolTip("設定編集モード中に選ぶと、カメラ/検出の値をまとめて入力します（保存は「変更を適用」）。")
+        cb.currentIndexChanged.connect(lambda _: self._apply_perf_preset_to_widgets())
+        preset_row.addWidget(cb, 1)
+        root.addLayout(preset_row)
+        self._cb_perf_preset = cb
+        self._perf_preset_widgets.append(cb)
 
         form_container = QWidget()
         form = QVBoxLayout(form_container)
@@ -591,6 +654,7 @@ class MainWindow(QMainWindow):
         width.setToolTip("プレビュー/解析に使う横解像度（幅）です。下げると軽くなります。")
         self._bind_setting("camera.width", width, camera_restart=True)
         layout.addRow("解像度（幅）", width)
+        self._sb_cam_width = width
 
         height = QSpinBox()
         height.setRange(120, 1080)
@@ -598,6 +662,7 @@ class MainWindow(QMainWindow):
         height.setToolTip("プレビュー/解析に使う縦解像度（高さ）です。下げると軽くなります。")
         self._bind_setting("camera.height", height, camera_restart=True)
         layout.addRow("解像度（高さ）", height)
+        self._sb_cam_height = height
 
         fps = QSpinBox()
         fps.setRange(5, 120)
@@ -605,6 +670,7 @@ class MainWindow(QMainWindow):
         fps.setToolTip("カメラの目標FPSです。高すぎると負荷が増えます。")
         self._bind_setting("camera.fps", fps, camera_restart=True)
         layout.addRow("FPS", fps)
+        self._sb_cam_fps = fps
 
         roi_enabled = QCheckBox("enabled")
         roi_enabled.setChecked(bool(s.camera.roi.enabled))
@@ -692,6 +758,7 @@ class MainWindow(QMainWindow):
         fs.setToolTip("解析を間引くフレーム数です。0で毎フレーム解析（重い）。増やすと軽くなります。")
         self._bind_setting("detection.frame_skip", fs)
         layout.addRow("フレーム間引き", fs)
+        self._sb_det_frame_skip = fs
 
         return g
 
@@ -1227,6 +1294,11 @@ class MainWindow(QMainWindow):
         self._preview_cb.stateChanged.connect(lambda st: self.previewEnabledChanged.emit(bool(st)))
         ctl_row.addWidget(self._preview_cb)
 
+        self._preview_detail_cb = QCheckBox("骨格描画（さらに重い）")
+        self._preview_detail_cb.setChecked(False)
+        self._preview_detail_cb.stateChanged.connect(lambda st: self.previewDetailEnabledChanged.emit(bool(st)))
+        ctl_row.addWidget(self._preview_detail_cb)
+
         self._control_cb = QCheckBox("OS操作を有効化（危険）")
         self._control_cb.setChecked(False)
         self._control_cb.stateChanged.connect(lambda st: self._set_control_enabled_from_ui(bool(st)))
@@ -1305,6 +1377,7 @@ class MainWindow(QMainWindow):
         try:
             dbg = status.get("controller") or {}
             ctrl = status.get("control") or {}
+            perf = status.get("perf") or {}
             dist = status.get("contact_distance")
             dist_s = f"{float(dist):.4f}" if isinstance(dist, (int, float)) else str(dist)
 
@@ -1313,7 +1386,10 @@ class MainWindow(QMainWindow):
                 f"mode={status.get('mode')} fc={status.get('finger_count')} "
                 f"idx={int(bool(status.get('index_extended')))} mid={int(bool(status.get('middle_extended')))} "
                 f"c={int(bool(status.get('contact')))} pre={int(bool(status.get('pre_contact')))} dist={dist_s} "
-                f"lat={float(status.get('latency_ms')):.1f}ms fps={float(status.get('fps')):.1f}\n"
+                f"lat={float(status.get('latency_ms')):.1f}ms fps={float(status.get('fps')):.1f} "
+                f"det={float(perf.get('detector_ms', 0.0)):.1f}ms "
+                f"ctl={float(perf.get('controller_ms', 0.0)):.1f}ms "
+                f"prev={float(perf.get('preview_ms', 0.0)):.1f}ms\n"
                 "control: "
                 f"os={int(bool(status.get('control_enabled')))} apply={int(bool(dbg.get('apply_actions')))} "
                 f"streak={dbg.get('mouse_mode_streak')} "
@@ -1340,6 +1416,7 @@ class MainWindow(QMainWindow):
         # モーションタブが見えている時だけプレビューをONにする
         is_motion = self._tabs.tabText(idx) == "モーションテスト"
         self.previewEnabledChanged.emit(bool(is_motion and self._preview_cb.isChecked()))
+        self.previewDetailEnabledChanged.emit(bool(is_motion and self._preview_detail_cb.isChecked()))
         # マニュアルタブ表示時に docs/ を再読み込み（編集反映・起動中の更新向け）
         if self._tabs.tabText(idx) == "マニュアル":
             self._reload_manual()
