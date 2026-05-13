@@ -7,7 +7,15 @@ from typing import Any, List, Optional, Tuple
 import sys
 
 from PyQt6.QtCore import QEvent, QLocale, QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QGuiApplication, QImage, QKeyEvent, QPainter, QPixmap
+from PyQt6.QtGui import (
+    QGuiApplication,
+    QImage,
+    QKeyEvent,
+    QPainter,
+    QPixmap,
+    QTextCursor,
+    QTextDocument,
+)
 from PyQt6.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
@@ -19,10 +27,13 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QSplitter,
     QTabWidget,
     QTextBrowser,
     QTextEdit,
@@ -267,6 +278,7 @@ class MainWindow(QMainWindow):
         self._sb_cam_fps: Optional[QSpinBox] = None
         self._sb_det_frame_skip: Optional[QSpinBox] = None
         self._cb_perf_preset: Optional[QComboBox] = None
+        self._cb_control_preset: Optional[QComboBox] = None
 
         self.setWindowTitle("PalmControl")
         self.resize(980, 720)
@@ -450,6 +462,67 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _apply_control_preset_to_widgets(self) -> None:
+        """選択中の操作感度プリセットを、設定ウィジェットへ反映する（保存はしない）。"""
+
+        cb = getattr(self, "_cb_control_preset", None)
+        if cb is None:
+            return
+        key = str(cb.currentData() or "")
+        if not key:
+            return
+
+        presets: dict[str, List[Tuple[str, Any]]] = {
+            "browse": [
+                ("control.sensitivity", 2.8),
+                ("control.sensitivity_x", 2.8),
+                ("control.sensitivity_y", 2.8),
+                ("control.smoothing_factor", 0.45),
+                ("control.relative_move_clamp_th", 0.28),
+                ("control.relative_move_vertical_gain", 1.45),
+                ("control.tap_interval_ms", 400),
+                ("control.scroll_sensitivity", 22),
+            ],
+            "presentation": [
+                ("control.sensitivity", 3.1),
+                ("control.sensitivity_x", 3.1),
+                ("control.sensitivity_y", 3.1),
+                ("control.smoothing_factor", 0.38),
+                ("control.relative_move_clamp_th", 0.32),
+                ("control.relative_move_vertical_gain", 1.55),
+                ("control.tap_interval_ms", 380),
+                ("control.scroll_sensitivity", 28),
+                ("control.scroll_deadzone", 0.002),
+            ],
+            "precision": [
+                ("control.sensitivity", 2.0),
+                ("control.sensitivity_x", 2.0),
+                ("control.sensitivity_y", 2.0),
+                ("control.smoothing_factor", 0.58),
+                ("control.relative_move_clamp_th", 0.18),
+                ("control.relative_move_vertical_gain", 1.35),
+                ("control.tap_interval_ms", 520),
+                ("control.drag_hold_ms", 2000),
+                ("control.cursor_anchoring.enabled", True),
+                ("control.cursor_anchoring.freeze_frames", 6),
+                ("control.cursor_anchoring.override_smoothing_factor_ema", 0.03),
+                ("control.click_requires_middle_bent", True),
+                ("control.move_suppress_on_middle_bent", True),
+            ],
+        }
+        rows = presets.get(key)
+        if not rows:
+            return
+
+        for path, val in rows:
+            for p2, w, _ in self._settings_bindings:
+                if p2 == path:
+                    try:
+                        self._set_widget_from_value(w, val)
+                    except Exception:
+                        pass
+                    break
+
     def _on_settings_edit_clicked(self) -> None:
         self._settings_edit_mode = True
         self._set_settings_fields_enabled(True)
@@ -599,6 +672,22 @@ class MainWindow(QMainWindow):
         root.addLayout(preset_row)
         self._cb_perf_preset = cb
         self._perf_preset_widgets.append(cb)
+
+        ctrl_preset_row = QHBoxLayout()
+        ctrl_preset_row.addWidget(QLabel("操作感度プリセット"))
+        cb_ctrl = QComboBox()
+        cb_ctrl.addItem("—", "")
+        cb_ctrl.addItem("ブラウズ（素早め・端まで届きやすめ）", "browse")
+        cb_ctrl.addItem("プレゼン（大きく動かしやすめ）", "presentation")
+        cb_ctrl.addItem("精密クリック（遅め・固定強め）", "precision")
+        cb_ctrl.setToolTip(
+            "設定編集モード中に選ぶと、マウス感度・平滑化・タップ間隔・スクロール等をまとめて入力します（保存は「変更を適用」）。"
+        )
+        cb_ctrl.currentIndexChanged.connect(lambda _: self._apply_control_preset_to_widgets())
+        ctrl_preset_row.addWidget(cb_ctrl, 1)
+        root.addLayout(ctrl_preset_row)
+        self._cb_control_preset = cb_ctrl
+        self._perf_preset_widgets.append(cb_ctrl)
 
         form_container = QWidget()
         form = QVBoxLayout(form_container)
@@ -1465,6 +1554,102 @@ class MainWindow(QMainWindow):
     # -----------------------------
     # Manual tab
     # -----------------------------
+    def _manual_collect_parts(self) -> List[Tuple[Path, str]]:
+        """docs/*.md をファイル名順に (パス, 本文) のリストで返す。"""
+
+        docs_dir = Path("docs")
+        if not docs_dir.exists():
+            return []
+        out: List[Tuple[Path, str]] = []
+        for p in sorted(docs_dir.glob("*.md")):
+            try:
+                body = p.read_text(encoding="utf-8").strip()
+            except Exception:
+                continue
+            if body:
+                out.append((p, body))
+        return out
+
+    def _manual_markdown_all(self, parts: List[Tuple[Path, str]]) -> str:
+        blocks: List[str] = []
+        for p, body in parts:
+            blocks.append(f"## {p.name}\n\n{body}")
+        return "\n\n---\n\n".join(blocks) if blocks else "マニュアルを読み込めませんでした。"
+
+    def _manual_markdown_single(self, parts: List[Tuple[Path, str]], name: str) -> str:
+        for p, body in parts:
+            if p.name == name:
+                return f"# {p.name}\n\n{body}"
+        return f"「{name}」が見つかりません。マニュアル再読込を試してください。"
+
+    def _populate_manual_doc_list(self) -> None:
+        if not hasattr(self, "_manual_list"):
+            return
+        prev_key: Optional[str] = None
+        cur = self._manual_list.currentItem()
+        if cur is not None:
+            v = cur.data(Qt.ItemDataRole.UserRole)
+            prev_key = str(v) if v is not None else None
+
+        self._manual_list.blockSignals(True)
+        try:
+            self._manual_list.clear()
+            it0 = QListWidgetItem("(すべて)")
+            it0.setData(Qt.ItemDataRole.UserRole, "__all__")
+            self._manual_list.addItem(it0)
+            for p, _ in self._manual_collect_parts():
+                it = QListWidgetItem(p.name)
+                it.setData(Qt.ItemDataRole.UserRole, p.name)
+                self._manual_list.addItem(it)
+        finally:
+            self._manual_list.blockSignals(False)
+
+        if prev_key:
+            for i in range(self._manual_list.count()):
+                it2 = self._manual_list.item(i)
+                if it2 is not None and str(it2.data(Qt.ItemDataRole.UserRole) or "") == prev_key:
+                    self._manual_list.setCurrentRow(i)
+                    return
+        self._manual_list.setCurrentRow(0)
+
+    def _manual_render_visible(self) -> None:
+        if not hasattr(self, "_manual_view"):
+            return
+        parts = self._manual_collect_parts()
+        if not parts:
+            docs_dir = Path("docs")
+            if not docs_dir.exists():
+                self._manual_view.setMarkdown("docs/ が見つかりません。操作ガイドは docs/ に追加してください。")
+            else:
+                self._manual_view.setMarkdown("docs/ に Markdown がありません。操作ガイドを追加してください。")
+            return
+
+        item = self._manual_list.currentItem()
+        if item is None:
+            self._manual_view.setMarkdown(self._manual_markdown_all(parts))
+            return
+        key = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        if key == "__all__":
+            self._manual_view.setMarkdown(self._manual_markdown_all(parts))
+        else:
+            self._manual_view.setMarkdown(self._manual_markdown_single(parts, key))
+
+    def _on_manual_doc_row_changed(self, _row: int) -> None:
+        self._manual_render_visible()
+
+    def _manual_find_next(self) -> None:
+        if not hasattr(self, "_manual_view") or not hasattr(self, "_manual_find_edit"):
+            return
+        q = self._manual_find_edit.text()
+        if not q.strip():
+            return
+        flags = QTextDocument.FindFlag(0)
+        if not self._manual_view.find(q, flags):
+            cur = self._manual_view.textCursor()
+            cur.movePosition(QTextCursor.MoveOperation.Start)
+            self._manual_view.setTextCursor(cur)
+            self._manual_view.find(q, flags)
+
     def _build_manual_tab(self) -> QWidget:
         w = QWidget()
         root = QVBoxLayout(w)
@@ -1478,36 +1663,46 @@ class MainWindow(QMainWindow):
         btn_row.addStretch(1)
         root.addLayout(btn_row)
 
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._manual_list = QListWidget()
+        self._manual_list.setMinimumWidth(220)
+        self._manual_list.setToolTip("表示するドキュメントを選びます。「(すべて)」は従来どおり連結表示です。")
+        self._manual_list.currentRowChanged.connect(self._on_manual_doc_row_changed)
+
+        right = QWidget()
+        rlay = QVBoxLayout(right)
+        rlay.setContentsMargins(0, 0, 0, 0)
+        rlay.setSpacing(8)
+        find_row = QHBoxLayout()
+        find_row.addWidget(QLabel("検索"))
+        self._manual_find_edit = QLineEdit()
+        self._manual_find_edit.setPlaceholderText("語句を入力して Enter / 次へ")
+        self._manual_find_edit.returnPressed.connect(self._manual_find_next)
+        find_row.addWidget(self._manual_find_edit, 1)
+        find_next = QPushButton("次へ")
+        find_next.setToolTip("表示中のテキスト内で次の一致へ移動します（末尾で折り返し）。")
+        find_next.clicked.connect(self._manual_find_next)
+        find_row.addWidget(find_next)
+        rlay.addLayout(find_row)
+
         self._manual_view = QTextBrowser()
         self._manual_view.setOpenExternalLinks(True)
-        # Markdown表示（QtのMarkdownサブセット）。分割ドキュメントを連結して表示する。
-        self._manual_view.setMarkdown(self._load_manual_text())
-        root.addWidget(self._manual_view, 1)
+        rlay.addWidget(self._manual_view, 1)
+
+        splitter.addWidget(self._manual_list)
+        splitter.addWidget(right)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        root.addWidget(splitter, 1)
+
+        self._populate_manual_doc_list()
+        self._manual_render_visible()
         return w
 
     def _reload_manual(self) -> None:
         if not hasattr(self, "_manual_view"):
             return
-        self._manual_view.setMarkdown(self._load_manual_text())
+        self._populate_manual_doc_list()
+        self._manual_render_visible()
         self._manual_view.verticalScrollBar().setValue(0)
-
-    def _load_manual_text(self) -> str:
-        docs_dir = Path("docs")
-        if not docs_dir.exists():
-            return "docs/ が見つかりません。操作ガイドは docs/ に追加してください。"
-        # docs/ 直下の *.md をファイル名順に連結（分割ドキュメントの読み込み順をファイル名で制御）
-        md_files = sorted(docs_dir.glob("*.md"))
-        if not md_files:
-            return "docs/ にMarkdownがありません。操作ガイドを追加してください。"
-        parts = []
-        for p in md_files:
-            try:
-                body = p.read_text(encoding="utf-8").strip()
-                if not body:
-                    continue
-                # 見出しで区切る（ASCIIの大きな区切り線は使わない）
-                parts.append(f"## {p.name}\n\n{body}")
-            except Exception:
-                pass
-        return "\n\n---\n\n".join(parts) if parts else "マニュアルを読み込めませんでした。"
 
